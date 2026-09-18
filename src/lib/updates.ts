@@ -23,8 +23,13 @@ export async function checkLatestAppVersion(): Promise<string> {
 }
 
 export function isUpdateAvailable(current: string, latest: string): boolean {
-  const a = current.split(".").map(Number);
-  const b = latest.split(".").map(Number);
+  // Strip any prerelease/build suffix (e.g. this fork's "-win.N" tag) before
+  // comparing numeric version parts — the naive per-segment Number() parsing
+  // below would otherwise treat a suffixed segment like "1-win" as NaN and
+  // produce unreliable comparison results.
+  const numeric = (v: string) => v.split("-")[0].split(".").map(Number);
+  const a = numeric(current);
+  const b = numeric(latest);
   const len = Math.max(a.length, b.length);
   for (let i = 0; i < len; i++) {
     const av = a[i] ?? 0;
