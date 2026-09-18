@@ -16,6 +16,27 @@ llama-manager
 
 Requires Node.js 18+ and a llama.cpp binary (managed via the Versions tab or installed manually).
 
+### Windows
+
+This is a fork ([mkronvold/llama-manager](https://github.com/mkronvold/llama-manager)) hardened
+for native Windows/PowerShell usage; see `windows-support-enhancement-plan.md` for the full
+rationale. Prerequisites and recommendations:
+
+- **Node.js 18+ (LTS 20.x recommended)**, installed from [nodejs.org](https://nodejs.org) or via
+  `winget install OpenJS.NodeJS.LTS`.
+- **Visual Studio Build Tools** (the "Desktop development with C++" workload, or at minimum the
+  "C++ build tools" component) are required the first time `npm install` compiles the
+  `better-sqlite3` native module, unless a prebuilt binary is available for your Node/arch
+  combination. Install via `winget install Microsoft.VisualStudio.2022.BuildTools` or the
+  [Visual Studio installer](https://visualstudio.microsoft.com/downloads/).
+- **Terminal host**: [Windows Terminal](https://aka.ms/terminal) with **PowerShell 7 (`pwsh`)** is
+  the recommended and best-tested combination (proper VT100/true-color and mouse support). Legacy
+  `cmd.exe` or Windows PowerShell 5.1 in the classic console host will work but may render themes
+  and colors incorrectly — llama-manager prints a one-time warning at startup if it detects this.
+- Config/data/state directories default to `%APPDATA%\llama-manager` and
+  `%LOCALAPPDATA%\llama-manager` on Windows (see Storage below); existing data from a previous
+  XDG-style install is migrated automatically on first run.
+
 ## Features
 
 - **Dashboard** — real-time per-slot metrics, server controls (start/stop/restart), loaded model info, and recent-task charts
@@ -57,15 +78,19 @@ Requires Node.js 18+ and a llama.cpp binary (managed via the Versions tab or ins
 
 ## Storage
 
-Follows XDG Base Directory spec. All paths configurable in Options.
+Follows the XDG Base Directory spec on Linux/macOS. On Windows, uses idiomatic
+`%APPDATA%`/`%LOCALAPPDATA%` locations instead; legacy XDG-style data from a previous install is
+auto-migrated the first time the new locations are used. All paths configurable in Options, and
+still overridable via `XDG_*_HOME` env vars if explicitly set.
 
-| What | Default Path |
-|---|---|
-| Config | `~/.config/llama-manager/config.json` |
-| Versions | `~/.local/share/llama-manager/versions/` |
-| Models | `~/.cache/huggingface/llama-manager/` |
-| Tasks DB | `~/.local/share/llama-manager/tasks.db` |
-| Server log | `~/.local/state/llama-manager/logs/server.<timestamp>.log` |
+| What | Linux/macOS Default | Windows Default |
+|---|---|---|
+| Config | `~/.config/llama-manager/config.json` | `%APPDATA%\llama-manager\config.json` |
+| Versions | `~/.local/share/llama-manager/versions/` | `%LOCALAPPDATA%\llama-manager\versions\` |
+| Models | `~/.cache/huggingface/llama-manager/` | `~/.cache/huggingface/llama-manager/` (unchanged — matches Hugging Face tooling's own cross-platform default) |
+| Tasks DB | `~/.local/share/llama-manager/tasks.db` | `%LOCALAPPDATA%\llama-manager\tasks.db` |
+| Server log | `~/.local/state/llama-manager/logs/server.<timestamp>.log` | `%LOCALAPPDATA%\llama-manager\state\logs\server.<timestamp>.log` |
+
 
 ## Themes
 

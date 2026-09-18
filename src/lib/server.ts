@@ -10,14 +10,10 @@ import { processModelLine, resetModelInfo } from "../ui/specialized/LoadedModelP
 import { taskStore } from "./tasks";
 import { detectForkFromFolder, resolveBinaryName, isForkCompatibleWithPreset, isFieldCompatibleWithFork, getFieldFlag, isNegateInverted, getFieldTransform } from "./forks";
 
-function resolveServerBinary(versionPath: string): string | null {
-  if (os.platform() === "win32") {
-    const winBin = path.join(versionPath, "llama-server.exe");
-    return fs.pathExistsSync(winBin) ? winBin : null;
-  }
-  const unixBin = path.join(versionPath, "llama-server");
-  return fs.pathExistsSync(unixBin) ? unixBin : null;
-}
+// NB: Windows/POSIX binary-name resolution lives solely in forks.ts's
+// `resolveBinaryName()` (used below), which this file previously duplicated via a
+// dead, unused local `resolveServerBinary()` helper — removed to avoid future drift
+// between the two.
 
 let serverProcess: ChildProcess | null = null;
 let serverStartTime: number | null = null;
@@ -180,6 +176,30 @@ export function startServer(config: ConfigData): Promise<number> {
   });
 }
 
+/**
+ * Terminate a process (and its child tree) in a platform-appropriate way.
+ *
+ * Node's `ChildProcess.kill(signal)` does not deliver POSIX signals on Windows — any
+ * signal string there triggers an immediate hard `TerminateProcess`, giving the target
+ * binary no chance to flush the KV cache / close sockets gracefully. Use `taskkill`
+ * instead: without `/F` it requests graceful termination (and, with `/T`, of the whole
+ * process tree); with `/F` it force-kills, mirroring the existing SIGTERM-then-SIGKILL
+ * escalation used on POSIX platforms.
+ */
+function terminateProcessTree(pid: number, force: boolean): void {
+  if (os.platform() === "win32") {
+    const args = ["/PID", String(pid), "/T"];
+    if (force) args.push("/F");
+    spawnSync("taskkill", args, { stdio: "ignore" });
+    return;
+  }
+  try {
+    process.kill(pid, force ? "SIGKILL" : "SIGTERM");
+  } catch {
+    // process already gone
+  }
+}
+
 export function stopServer(): Promise<void> {
   return withLock(() => new Promise((resolve) => {
     if (!serverProcess?.pid) {
@@ -194,11 +214,11 @@ export function stopServer(): Promise<void> {
       resolve();
     });
 
-    serverProcess.kill("SIGTERM");
+    terminateProcessTree(pid, false);
 
     setTimeout(() => {
       if (serverProcess?.pid === pid) {
-        serverProcess.kill("SIGKILL");
+        terminateProcessTree(pid, true);
       }
     }, 5000);
   }));

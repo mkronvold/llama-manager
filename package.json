@@ -11,7 +11,8 @@
     "prepare": "npm run build",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
   },
   "keywords": [
     "llama-cpp",
@@ -51,6 +52,7 @@
     "@types/terminal-kit": "^2.5.0",
     "tsup": "^8.5.1",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^5.0.1"
   }
 }

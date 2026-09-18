@@ -2,15 +2,68 @@ import fs from "fs-extra";
 import path from "path";
 import os from "os";
 
+const isWin = os.platform() === "win32";
+
+// Legacy XDG-style locations used on all platforms (including Windows) prior to this
+// fix. Kept around so `migrateLegacyWindowsDirs()` can detect and copy old user data
+// on first run after upgrading.
+const XDG_CONFIG_DEFAULT = path.join(os.homedir(), ".config", "llama-manager");
+const XDG_DATA_DEFAULT = path.join(os.homedir(), ".local", "share", "llama-manager");
+const XDG_STATE_DEFAULT = path.join(os.homedir(), ".local", "state", "llama-manager");
+
+// Windows-idiomatic locations: %APPDATA% (roaming config) and %LOCALAPPDATA%
+// (machine-local data/state), instead of XDG dot-folders that are unusual on Windows,
+// invisible to most Windows backup/roaming tooling, and surprising to users.
+const WIN_APPDATA = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+const WIN_LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+const WIN_CONFIG_DEFAULT = path.join(WIN_APPDATA, "llama-manager");
+const WIN_DATA_DEFAULT = path.join(WIN_LOCALAPPDATA, "llama-manager");
+const WIN_STATE_DEFAULT = path.join(WIN_LOCALAPPDATA, "llama-manager", "state");
+
 const CONFIG_DIR =
-  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config", "llama-manager");
+  process.env.XDG_CONFIG_HOME || (isWin ? WIN_CONFIG_DEFAULT : XDG_CONFIG_DEFAULT);
 const DATA_DIR =
-  process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share", "llama-manager");
+  process.env.XDG_DATA_HOME || (isWin ? WIN_DATA_DEFAULT : XDG_DATA_DEFAULT);
 const STATE_DIR =
-  process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state", "llama-manager");
+  process.env.XDG_STATE_HOME || (isWin ? WIN_STATE_DEFAULT : XDG_STATE_DEFAULT);
+// NB: intentionally NOT platform-branched — Hugging Face tooling (huggingface_hub,
+// transformers, etc.) itself defaults HF_HOME to "~/.cache/huggingface" on every OS
+// including Windows, so matching that (rather than %LOCALAPPDATA%) keeps any
+// already-downloaded models shared with real HF tooling discoverable.
 const HF_HOME = process.env.HF_HOME || path.join(os.homedir(), ".cache", "huggingface");
 
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+
+/**
+ * One-time, best-effort migration of pre-existing XDG dot-folder config/data/state
+ * from before Windows got its own idiomatic directories. Only runs on win32, only
+ * when the user hasn't explicitly overridden locations via XDG_*_HOME env vars, and
+ * only copies when the new location doesn't already have data (never overwrites).
+ * Never throws — migration failures should not block startup.
+ */
+async function migrateLegacyWindowsDirs(): Promise<void> {
+  if (!isWin) return;
+  if (process.env.XDG_CONFIG_HOME || process.env.XDG_DATA_HOME || process.env.XDG_STATE_HOME) return;
+
+  const moves: Array<[string, string]> = [
+    [XDG_CONFIG_DEFAULT, WIN_CONFIG_DEFAULT],
+    [XDG_DATA_DEFAULT, WIN_DATA_DEFAULT],
+    [XDG_STATE_DEFAULT, WIN_STATE_DEFAULT],
+  ];
+  for (const [oldDir, newDir] of moves) {
+    if (oldDir === newDir) continue;
+    try {
+      const oldExists = await fs.pathExists(oldDir);
+      const newExists = await fs.pathExists(newDir);
+      if (oldExists && !newExists) {
+        await fs.ensureDir(path.dirname(newDir));
+        await fs.copy(oldDir, newDir);
+      }
+    } catch {
+      // best-effort; never block startup on migration failure
+    }
+  }
+}
 
 export type PresetFieldType = "string" | "number" | "boolean" | "enum";
 
@@ -528,6 +581,7 @@ function migrateLegacyConfig(data: any): ConfigData {
 }
 
 export async function loadConfig(): Promise<ConfigData> {
+  await migrateLegacyWindowsDirs();
   try {
     const data = await fs.readJson(CONFIG_PATH, { throws: false });
     if (!data) return DEFAULT_CONFIG;

@@ -28,6 +28,7 @@ export const BACKEND_LABELS: Record<string, string> = {
   "rocm-gfx908": "ROCm gfx908",
   openvino: "OpenVINO",
   opencl: "OpenCL",
+  sycl: "SYCL",
   hip: "HIP/Radeon",
   oldpc: "CUDA (old GPU)",
 };
@@ -76,7 +77,80 @@ export async function listRecentVersions(forkId: string, limit = 20): Promise<Re
   }));
 }
 
+/**
+ * Convert an absolute path to Windows' extended-length ("\\?\") form so extraction of
+ * archives with deeply nested entries doesn't hit the legacy 260-character MAX_PATH
+ * limit. This bypasses MAX_PATH at the Win32 API layer regardless of whether the
+ * "Enable Win32 long paths" group policy is turned on, and is a no-op on other
+ * platforms. Node's own fs layer already does some of this internally, but applying it
+ * explicitly for the extraction target directory maximizes compatibility across
+ * Windows versions/policies and third-party extraction libraries.
+ */
+function toExtendedLengthPath(p: string): string {
+  if (os.platform() !== "win32") return p;
+  const resolved = path.resolve(p);
+  if (resolved.startsWith("\\\\?\\")) return resolved;
+  if (resolved.startsWith("\\\\")) return `\\\\?\\UNC\\${resolved.slice(2)}`;
+  return `\\\\?\\${resolved}`;
+}
+
 export type InstallProgress = (pct: number, label: string) => void;
+
+/** Transient Windows-only fs error codes seen when antivirus/Defender briefly locks
+ * a just-written or just-extracted file (chmod/move racing a real-time AV scan). */
+const TRANSIENT_WIN_FS_CODES = new Set(["EBUSY", "EPERM", "EACCES"]);
+
+/**
+ * Retry an fs operation with backoff when it fails with a transient Windows file-lock
+ * error. No-ops (single attempt, rethrows immediately) on non-Windows platforms since
+ * these errors are not expected there.
+ */
+async function retryOnTransientFsError<T>(
+  fn: () => Promise<T>,
+  opts: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<T> {
+  const attempts = opts.attempts ?? (os.platform() === "win32" ? 5 : 1);
+  const baseDelayMs = opts.baseDelayMs ?? 200;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const code = err?.code as string | undefined;
+      if (os.platform() !== "win32" || !code || !TRANSIENT_WIN_FS_CODES.has(code) || i === attempts - 1) {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Runs `fn` while periodically invoking `onStall` if no progress has been observed for
+ * `stallMs`. Call the returned `tick()` from within `fn` whenever real progress happens
+ * (e.g. a chunk written); `onStall` fires repeatedly at `stallMs` intervals until progress
+ * resumes or `fn` settles. Always cleans up its timer.
+ */
+async function withStallWatchdog<T>(
+  fn: (tick: () => void) => Promise<T>,
+  onStall: (elapsedMs: number) => void,
+  stallMs = 15000,
+): Promise<T> {
+  let lastProgress = Date.now();
+  const timer = setInterval(() => {
+    const elapsed = Date.now() - lastProgress;
+    if (elapsed >= stallMs) onStall(elapsed);
+  }, stallMs);
+  try {
+    return await fn(() => {
+      lastProgress = Date.now();
+    });
+  } finally {
+    clearInterval(timer);
+  }
+}
 
 function getBackendLabel(backend: string): string {
   if (BACKEND_LABELS[backend]) return BACKEND_LABELS[backend];
@@ -184,7 +258,15 @@ function extractBackendFromAsset(
   fork: ForkDefinition,
 ): string | null {
   if (fork.id === "koboldcpp") {
-    const ext = assetName.endsWith(".tar.gz") ? ".tar.gz" : assetName.endsWith(".zip") ? ".zip" : null;
+    // Windows koboldcpp assets are raw ".exe" files with no OS token in the name
+    // (e.g. "koboldcpp.exe", "koboldcpp-nocuda.exe"), unlike the linux/mac archives.
+    const ext = assetName.endsWith(".tar.gz")
+      ? ".tar.gz"
+      : assetName.endsWith(".zip")
+        ? ".zip"
+        : assetName.endsWith(".exe")
+          ? ".exe"
+          : null;
     const base = ext ? assetName.slice(0, assetName.length - ext.length) : assetName;
     for (const variant of fork.backendVariants) {
       if (variant.assetMatcher(base, platform)) {
@@ -220,7 +302,10 @@ function extractBackendFromAsset(
 
   const parts = between.slice(1).split("-");
   const runtime = parts[0].toLowerCase();
-  const known = ["cuda", "vulkan", "rocm", "openvino", "opencl", "hip", "adreno", "sycl"];
+  // "cpu" is included here because Windows llama.cpp/beellama/ik_llama releases publish
+  // an explicit "-cpu-" suffixed asset (unlike Ubuntu/macOS builds, which omit any
+  // suffix for the default CPU build and rely on the `between === ""` branch above).
+  const known = ["cpu", "cuda", "vulkan", "rocm", "openvino", "opencl", "hip", "adreno", "sycl"];
   if (!known.includes(runtime)) return null;
 
   const versionPart = parts.slice(1).join(".").replace(/[^0-9.]/g, "");
@@ -243,8 +328,15 @@ export function getAvailableBackends(
   for (const asset of assets) {
     const nameLower = asset.name.toLowerCase();
 
-    // Check OS token matches any of the fork's known OS tokens
-    if (!naming.osTokens.some(token => nameLower.includes(token.toLowerCase()))) continue;
+    // Windows raw-binary assets (e.g. koboldcpp's "koboldcpp.exe") often carry no OS
+    // token at all in the filename; an ".exe" extension unambiguously identifies them
+    // as Windows binaries in this codebase (POSIX raw binaries never use ".exe"), so
+    // skip the OS-token gate for that case instead of excluding them.
+    const isWindowsExe = !naming.isArchive && platform.startsWith("win") && nameLower.endsWith(".exe");
+    if (!isWindowsExe) {
+      // Check OS token matches any of the fork's known OS tokens
+      if (!naming.osTokens.some(token => nameLower.includes(token.toLowerCase()))) continue;
+    }
 
     // Check arch + extension for archives
     if (naming.isArchive) {
@@ -361,7 +453,14 @@ export async function installVersion(
     received += value.byteLength;
     const pct = Math.round((received / total) * 90);
     onProgress(pct, `Downloading: ${(received / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB`);
-    writeStream.write(value);
+    // Respect backpressure: if the internal buffer is full, wait for "drain" before
+    // reading more from the network. Without this, a slow disk (e.g. antivirus
+    // intercepting writes on Windows) lets the network race far ahead of disk I/O,
+    // causing unbounded memory growth that looks like a hang with no progress.
+    const canContinue = writeStream.write(value);
+    if (!canContinue) {
+      await new Promise<void>((resolve) => writeStream.once("drain", () => resolve()));
+    }
   }
   writeStream.end();
 
@@ -374,8 +473,8 @@ export async function installVersion(
     onProgress(92, `Preparing binary...`);
     const binaryName = resolveBinaryName(fork);
     const destPath = path.join(versionPath, binaryName);
-    await fs.move(tmpPath, destPath);
-    await fs.chmod(destPath, "755");
+    await retryOnTransientFsError(() => fs.move(tmpPath, destPath));
+    await retryOnTransientFsError(() => fs.chmod(destPath, "755"));
     onProgress(100, `Installed ${folderName}`);
     return folderName;
   }
@@ -385,7 +484,17 @@ export async function installVersion(
   if (assetName.endsWith(".zip")) {
     const extractZip = await import("extract-zip");
     try {
-      await extractZip.default(tmpPath, { dir: versionPath });
+      await withStallWatchdog(
+        async (tick) => {
+          const result = extractZip.default(tmpPath, { dir: toExtendedLengthPath(versionPath) });
+          // extract-zip doesn't expose incremental progress; treat the promise settling
+          // (or not) as the only signal, but still record a tick so the watchdog timer
+          // resets its clock from the start of this call rather than firing immediately.
+          tick();
+          return result;
+        },
+        (elapsedMs) => onProgress(92, `Extracting... (still working after ${Math.round(elapsedMs / 1000)}s — this can take a while on slower disks or when antivirus is scanning the extracted files)`),
+      );
     } catch (err: any) {
       await fs.remove(tmpPath);
       throw new Error(`Extraction failed: ${err.message}`);
@@ -393,14 +502,21 @@ export async function installVersion(
   } else if (assetName.endsWith(".tar.gz") || assetName.endsWith(".tgz")) {
     const tar = await import("tar");
     try {
-      await tar.extract({ file: tmpPath, cwd: versionPath });
+      await withStallWatchdog(
+        async (tick) => {
+          const result = tar.extract({ file: tmpPath, cwd: toExtendedLengthPath(versionPath) });
+          tick();
+          return result;
+        },
+        (elapsedMs) => onProgress(92, `Extracting... (still working after ${Math.round(elapsedMs / 1000)}s — this can take a while on slower disks or when antivirus is scanning the extracted files)`),
+      );
     } catch (err: any) {
       await fs.remove(tmpPath);
       throw new Error(`Extraction failed: ${err.message}`);
     }
   } else {
     const binaryName = path.basename(assetName).replace(/\.(zip|tar\.gz|tgz)$/, "");
-    await fs.move(tmpPath, path.join(versionPath, binaryName));
+    await retryOnTransientFsError(() => fs.move(tmpPath, path.join(versionPath, binaryName)));
   }
 
   await fs.remove(tmpPath);
@@ -412,15 +528,19 @@ export async function installVersion(
     const srcPath = path.join(versionPath, topDir.name);
     const entries = await fs.readdir(srcPath, { withFileTypes: true });
     for (const entry of entries) {
-      await fs.move(path.join(srcPath, entry.name), path.join(versionPath, entry.name), { overwrite: true });
+      await retryOnTransientFsError(() =>
+        fs.move(path.join(srcPath, entry.name), path.join(versionPath, entry.name), { overwrite: true }),
+      );
     }
-    await fs.remove(srcPath);
+    await retryOnTransientFsError(() => fs.remove(srcPath));
   }
 
   const binaryName = resolveBinaryName(fork);
   const binary = path.join(versionPath, binaryName);
   if (await fs.pathExists(binary)) {
-    await fs.chmod(binary, "755");
+    // fs.chmod is effectively a no-op on Windows (ACLs don't map to POSIX mode bits);
+    // harmless to call, kept for parity with POSIX platforms where it actually matters.
+    await retryOnTransientFsError(() => fs.chmod(binary, "755"));
   }
 
   onProgress(100, `Installed ${folderName}`);

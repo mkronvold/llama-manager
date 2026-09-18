@@ -66,7 +66,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
   "llama.cpp": {
     id: "llama.cpp",
     label: "llama.cpp",
-    githubRepo: "ggml-org/llama.cpp",
+    githubRepo: "ggml-org/llama.cpp", // NB: no formal "latest" release; releases are per-build "b####" tags
     binaryNames: { linux: "llama-server", macos: "llama-server", win: "llama-server.exe" },
     assetNamePattern: /^llama-.+-bin-/,
     extractDirPrefix: "llama-",
@@ -77,7 +77,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
     presetCategoryOverrides: null,
     assetNaming: {
       pattern: "llama-{tag}-bin-{os}-{backend}-{arch}.tar.gz",
-      osTokens: ["ubuntu", "macos"],
+      osTokens: ["ubuntu", "macos", "win"],
       archTokens: ["x64", "arm64"],
       extension: ".tar.gz",
       isArchive: true,
@@ -103,6 +103,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
         assetMatcher: (name, platform) => {
           if (platform.startsWith("ubuntu") || platform.startsWith("linux")) return name === "koboldcpp-linux-x64";
           if (platform.startsWith("macos")) return name === "koboldcpp-mac-arm64";
+          if (platform.startsWith("win")) return name === "koboldcpp";
           return false;
         },
       },
@@ -111,6 +112,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
         label: "CPU",
         assetMatcher: (name, platform) => {
           if (platform.startsWith("ubuntu") || platform.startsWith("linux")) return name === "koboldcpp-linux-x64-nocuda";
+          if (platform.startsWith("win")) return name === "koboldcpp-nocuda";
           return false;
         },
       },
@@ -119,6 +121,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
         label: "CUDA (old GPU)",
         assetMatcher: (name, platform) => {
           if (platform.startsWith("ubuntu") || platform.startsWith("linux")) return name === "koboldcpp-linux-x64-oldpc";
+          if (platform.startsWith("win")) return name === "koboldcpp-oldpc";
           return false;
         },
       },
@@ -133,8 +136,8 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
     ],
     presetCategoryOverrides: ["server", "model", "compute", "gpu", "speculative"],
     assetNaming: {
-      pattern: "koboldcpp-{os}-{arch}[-variant]",
-      osTokens: ["linux", "mac"],
+      pattern: "koboldcpp-{os}-{arch}[-variant] (Windows: koboldcpp[-variant].exe, no OS token)",
+      osTokens: ["linux", "mac", "win"],
       archTokens: ["x64", "arm64"],
       extension: null,
       isArchive: false,
@@ -303,7 +306,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
     presetCategoryOverrides: null,
     assetNaming: {
       pattern: "beellama-{tag}-bin-{os}-{backend}-{arch}.tar.gz",
-      osTokens: ["ubuntu", "macos"],
+      osTokens: ["ubuntu", "macos", "win"],
       archTokens: ["x64", "arm64"],
       extension: ".tar.gz",
       isArchive: true,
@@ -322,47 +325,31 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
     folderPrefix: "llamacpp_rocm-",
     isRawBinary: false,
     hasListDevices: true,
-    backendVariants: [
-      {
-        id: "rocm-gfx120X",
-        label: "ROCm gfx120X",
-        assetMatcher: (name) => name.includes("-rocm-gfx120X-"),
-      },
-      {
-        id: "rocm-gfx1151",
-        label: "ROCm gfx1151",
-        assetMatcher: (name) => name.includes("-rocm-gfx1151-"),
-      },
-      {
-        id: "rocm-gfx1150",
-        label: "ROCm gfx1150",
-        assetMatcher: (name) => name.includes("-rocm-gfx1150-"),
-      },
-      {
-        id: "rocm-gfx110X",
-        label: "ROCm gfx110X",
-        assetMatcher: (name) => name.includes("-rocm-gfx110X-"),
-      },
-      {
-        id: "rocm-gfx103X",
-        label: "ROCm gfx103X",
-        assetMatcher: (name) => name.includes("-rocm-gfx103X-"),
-      },
-      {
-        id: "rocm-gfx90a",
-        label: "ROCm gfx90a",
-        assetMatcher: (name) => name.includes("-rocm-gfx90a-"),
-      },
-      {
-        id: "rocm-gfx908",
-        label: "ROCm gfx908",
-        assetMatcher: (name) => name.includes("-rocm-gfx908-"),
-      },
-    ],
+    // Real asset OS token for this fork is "windows" (full word) for Windows builds
+    // and "ubuntu" for Linux builds — note the runtime `platform` key used throughout
+    // this app is always "win" (see getPlatformKey()), not "windows"; matchers below
+    // translate between the two. Without this OS check, the previous matchers (name
+    // substring only) matched the same gfx code on *either* OS, silently offering a
+    // Linux build as "available" on Windows and vice versa.
+    backendVariants: (() => {
+      const matchesOs = (name: string, platform: string, gfx: string): boolean => {
+        if (platform.startsWith("win")) return name.includes(`-windows-rocm-${gfx}-`);
+        if (platform.startsWith("ubuntu") || platform.startsWith("linux")) return name.includes(`-ubuntu-rocm-${gfx}-`);
+        return false;
+      };
+      const gfxCodes = ["gfx120X", "gfx1151", "gfx1150", "gfx110X", "gfx103X", "gfx90a", "gfx908"];
+      return gfxCodes.map((gfx) => ({
+        id: `rocm-${gfx}`,
+        label: `ROCm ${gfx}`,
+        assetMatcher: (name: string, platform: string) => matchesOs(name, platform, gfx),
+      }));
+    })(),
     presetCategoryOverrides: null,
     assetNaming: {
       pattern: "llama-{tag}-{os}-rocm-{gfx}-{arch}.zip",
-      osTokens: ["ubuntu", "win"],
+      // Actual upstream asset OS token is "windows" (not "win"); "win" is kept for
+      // substring-compatibility ("windows".includes("win")) but "windows" is explicit.
+      osTokens: ["ubuntu", "win", "windows"],
       archTokens: ["x64"],
       extension: ".zip",
       isArchive: true,
@@ -374,7 +361,10 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
   ik_llama: {
     id: "ik_llama",
     label: "ik_llama.cpp",
-    githubRepo: "ik517/ik_llama.cpp",
+    // NB: correct upstream owner is "ikawrakow" (not "ik517"); this fork currently
+    // publishes no prebuilt release binaries at all (source-build only), which is why
+    // getInstallableForks() excludes it below.
+    githubRepo: "ikawrakow/ik_llama.cpp",
     binaryNames: { linux: "llama-server", macos: "llama-server", win: "llama-server.exe" },
     assetNamePattern: /^llama-.+-bin-/,
     extractDirPrefix: "llama-",
@@ -385,7 +375,7 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
     presetCategoryOverrides: null,
     assetNaming: {
       pattern: "llama-{tag}-bin-{os}-{backend}-{arch}.tar.gz",
-      osTokens: ["ubuntu", "macos"],
+      osTokens: ["ubuntu", "macos", "win"],
       archTokens: ["x64", "arm64"],
       extension: ".tar.gz",
       isArchive: true,
