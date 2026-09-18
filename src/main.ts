@@ -3,6 +3,12 @@
 import terminalKit from "terminal-kit";
 import { LlamaManagerApp } from "./LlamaManagerApp";
 import { checkWindowsConsoleCapabilities } from "./lib/termcaps";
+import { checkNodeVersionCompatibility } from "./lib/nodeversion";
+
+const nodeVersionWarning = checkNodeVersionCompatibility();
+if (nodeVersionWarning) {
+  console.warn(`[llama-manager] ${nodeVersionWarning}`);
+}
 
 const consoleWarning = checkWindowsConsoleCapabilities();
 if (consoleWarning) {

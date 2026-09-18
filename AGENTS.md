@@ -58,7 +58,19 @@ cause analysis and rationale behind:
 - Extended-length (`\\?\`) path prefixing during extraction to reduce `MAX_PATH` risk
   (`src/lib/versions.ts`).
 - Legacy console capability detection/warning at startup (`src/lib/termcaps.ts`).
+- Node.js runtime version compatibility check at startup (`src/lib/nodeversion.ts`) — Node 24+
+  has a confirmed zlib streaming regression that hangs some zip extractions forever (see below);
+  `package.json`'s `engines` field and this check flag it.
 - Windows CI (`.github/workflows/windows-ci.yml`) running lint/build/test on `windows-latest`.
+
+**Known issue root-caused in this fork**: a report of version installs hanging forever at
+"Extracting..." was traced to a Node.js 24+ `zlib` inflate-stream bug (not this fork's
+code) — reproduced independently of the app via a bare `extract-zip` call and a raw `yauzl`+zlib
+stream with no disk I/O, both stalling at the identical byte offset; a `.NET`-based extraction of
+the same entry completed instantly, ruling out data corruption. `src/lib/versions.ts`'s
+`extractionStallMessage()` surfaces this explanation (with the actual `process.version`) once a
+stall has run long enough that antivirus scanning alone is an unlikely explanation. See the
+Windows Troubleshooting section in `README.md` for user-facing guidance.
 
 When making further Windows-related changes, keep them isolated to this fork's own commits/branches
 so periodic `git fetch upstream` syncs of unrelated (non-Windows) upstream improvements stay

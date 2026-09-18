@@ -152,6 +152,31 @@ async function withStallWatchdog<T>(
   }
 }
 
+/**
+ * Builds a progressively more specific diagnostic message for a stalled extraction.
+ * Below ~45s, a slow disk or antivirus real-time scan of newly extracted executables
+ * is the most likely (and most common) explanation. Beyond that, we've confirmed via
+ * isolated reproduction (bypassing this app entirely — a bare `extract-zip` call, and
+ * separately a raw `yauzl` + Node zlib readStream with zero disk I/O) that Node.js
+ * v24's built-in zlib inflate stream can hang indefinitely partway through certain
+ * larger zip entries, always stalling at the same byte offset — a Node.js runtime
+ * regression, not something this app's extraction/retry logic can work around. Once a
+ * stall has run long enough that AV scanning alone is an unlikely explanation, surface
+ * that possibility explicitly so a stuck install doesn't look like silent app-side
+ * corruption.
+ */
+export function extractionStallMessage(elapsedMs: number): string {
+  const seconds = Math.round(elapsedMs / 1000);
+  if (elapsedMs < 45000) {
+    return `Extracting... (still working after ${seconds}s — this can take a while on slower disks or when antivirus is scanning the extracted files)`;
+  }
+  return (
+    `Extracting... (still working after ${seconds}s — if this never finishes, it may be a known Node.js 24+ ` +
+    `zlib hang on some zip entries rather than antivirus; current runtime is ${process.version}. ` +
+    "Try Node 20 or 22 LTS if installs consistently hang here.)"
+  );
+}
+
 function getBackendLabel(backend: string): string {
   if (BACKEND_LABELS[backend]) return BACKEND_LABELS[backend];
   const base = Object.keys(BACKEND_LABELS).find((k) => backend.startsWith(k));
@@ -493,7 +518,7 @@ export async function installVersion(
           tick();
           return result;
         },
-        (elapsedMs) => onProgress(92, `Extracting... (still working after ${Math.round(elapsedMs / 1000)}s — this can take a while on slower disks or when antivirus is scanning the extracted files)`),
+        (elapsedMs) => onProgress(92, extractionStallMessage(elapsedMs)),
       );
     } catch (err: any) {
       await fs.remove(tmpPath);
@@ -508,7 +533,7 @@ export async function installVersion(
           tick();
           return result;
         },
-        (elapsedMs) => onProgress(92, `Extracting... (still working after ${Math.round(elapsedMs / 1000)}s — this can take a while on slower disks or when antivirus is scanning the extracted files)`),
+        (elapsedMs) => onProgress(92, extractionStallMessage(elapsedMs)),
       );
     } catch (err: any) {
       await fs.remove(tmpPath);

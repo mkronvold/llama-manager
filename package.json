@@ -6,6 +6,9 @@
   "bin": {
     "llama-manager": "./dist/main.js"
   },
+  "engines": {
+    "node": ">=18 <23"
+  },
   "scripts": {
     "build": "tsup",
     "prepare": "npm run build",

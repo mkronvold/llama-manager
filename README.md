@@ -22,8 +22,11 @@ This is a fork ([mkronvold/llama-manager](https://github.com/mkronvold/llama-man
 for native Windows/PowerShell usage; see `windows-support-enhancement-plan.md` for the full
 rationale. Prerequisites and recommendations:
 
-- **Node.js 18+ (LTS 20.x recommended)**, installed from [nodejs.org](https://nodejs.org) or via
-  `winget install OpenJS.NodeJS.LTS`.
+- **Use Node.js 18–22 (LTS 20.x recommended)**, installed from [nodejs.org](https://nodejs.org) or
+  via `winget install OpenJS.NodeJS.LTS`. **Avoid Node.js 24+**: it has a confirmed zlib streaming
+  regression that can make version installs hang forever mid-extraction on some zip entries (see
+  Troubleshooting below). `package.json` declares `"engines": { "node": ">=18 <23" }` and the app
+  prints a startup warning if it detects an untested Node major version.
 - **Visual Studio Build Tools** (the "Desktop development with C++" workload, or at minimum the
   "C++ build tools" component) are required the first time `npm install` compiles the
   `better-sqlite3` native module, unless a prebuilt binary is available for your Node/arch
@@ -36,6 +39,23 @@ rationale. Prerequisites and recommendations:
 - Config/data/state directories default to `%APPDATA%\llama-manager` and
   `%LOCALAPPDATA%\llama-manager` on Windows (see Storage below); existing data from a previous
   XDG-style install is migrated automatically on first run.
+
+#### Troubleshooting: a version install hangs forever at "Extracting..."
+
+If the Versions tab gets stuck at `Extracting...` and never finishes (even after several
+minutes, with the progress percentage frozen), this is very likely **not** disk speed or
+antivirus — it's a confirmed Node.js 24+ bug where the built-in `zlib` module's inflate stream
+can stall indefinitely partway through decompressing certain larger zip entries (e.g. the Vulkan
+backend's `ggml-vulkan.dll`, which bundles a large amount of compiled SPIR-V shader data).
+
+This was root-caused by reproducing the hang three independent ways, all stalling at the exact
+same byte offset regardless of antivirus, disk, or this app's own code: a full install through
+this app, a bare `extract-zip` call outside the app, and a raw `yauzl` + Node `zlib` read stream
+with no disk writes involved at all. A `.NET`-based extraction of the same zip entry, by contrast,
+completed instantly — confirming the zip data itself isn't corrupted.
+
+**Fix**: run `node --version`; if it reports v24 or newer, install Node.js 20 or 22 LTS instead
+(`winget install OpenJS.NodeJS.LTS`), reinstall/rebuild llama-manager, and retry the install.
 
 ## Features
 
