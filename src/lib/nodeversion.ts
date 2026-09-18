@@ -27,7 +27,9 @@ export function checkNodeVersionCompatibility(nodeVersion: string = process.vers
     return (
       `Running on Node.js ${nodeVersion}, newer than this fork's tested range (${MIN_SUPPORTED_NODE_MAJOR}-${MAX_SUPPORTED_NODE_MAJOR}). ` +
       "Node 24+ has a known zlib streaming issue that can make version installs hang forever during extraction " +
-      "of larger zip entries. If installs hang at \"Extracting...\", switch to Node 20 or 22 LTS."
+      "of larger zip entries. If installs hang at \"Extracting...\", switch to Node 22.x — note that as of late " +
+      "2025 Node 24 is itself the \"LTS\" release line, so installing via a generic \"LTS\" label/alias will not " +
+      "avoid this; pin an explicit 22.x install (e.g. via nvm-windows/fnm) instead."
     );
   }
 

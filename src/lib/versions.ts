@@ -173,7 +173,8 @@ export function extractionStallMessage(elapsedMs: number): string {
   return (
     `Extracting... (still working after ${seconds}s — if this never finishes, it may be a known Node.js 24+ ` +
     `zlib hang on some zip entries rather than antivirus; current runtime is ${process.version}. ` +
-    "Try Node 20 or 22 LTS if installs consistently hang here.)"
+    "Try switching to Node 22.x if installs consistently hang here — note Node 24 is now the \"LTS\" release " +
+    "line, so a generic LTS install won't avoid this; pin an explicit 22.x version instead.)"
   );
 }
 

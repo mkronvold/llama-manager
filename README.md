@@ -22,11 +22,21 @@ This is a fork ([mkronvold/llama-manager](https://github.com/mkronvold/llama-man
 for native Windows/PowerShell usage; see `windows-support-enhancement-plan.md` for the full
 rationale. Prerequisites and recommendations:
 
-- **Use Node.js 18–22 (LTS 20.x recommended)**, installed from [nodejs.org](https://nodejs.org) or
-  via `winget install OpenJS.NodeJS.LTS`. **Avoid Node.js 24+**: it has a confirmed zlib streaming
-  regression that can make version installs hang forever mid-extraction on some zip entries (see
-  Troubleshooting below). `package.json` declares `"engines": { "node": ">=18 <23" }` and the app
-  prints a startup warning if it detects an untested Node major version.
+- **Use Node.js 22.x** (or any 18–22 release). **Avoid Node.js 24+**: it has a confirmed zlib
+  streaming regression that can make version installs hang forever mid-extraction on some zip
+  entries (see Troubleshooting below). `package.json` declares `"engines": { "node": ">=18 <23" }`
+  and the app prints a startup warning if it detects an untested Node major version.
+  ⚠️ **Don't rely on `winget install OpenJS.NodeJS.LTS`** or downloading "LTS" from nodejs.org as
+  of late 2025 — Node.js 24 became the current LTS line (Oct 2025), so that alias/label now
+  installs the very version with this bug. Instead, pin an explicit Node 22.x install:
+  - Recommended: install a Node version manager — [nvm-windows](https://github.com/coreybutler/nvm-windows)
+    (`winget install CoreyButler.NVMforWindows`) or [fnm](https://github.com/Schniz/fnm)
+    (`winget install Schniz.fnm`) — then `nvm install 22.23.2 && nvm use 22.23.2` (or the fnm
+    equivalent). This also makes it easy to switch back once the Node 24+ zlib bug is fixed
+    upstream.
+  - Alternative: download a specific 22.x installer directly from
+    [nodejs.org/download/release/latest-v22.x](https://nodejs.org/download/release/latest-v22.x/)
+    rather than the site's generic "LTS" download button.
 - **Visual Studio Build Tools** (the "Desktop development with C++" workload, or at minimum the
   "C++ build tools" component) are required the first time `npm install` compiles the
   `better-sqlite3` native module, unless a prebuilt binary is available for your Node/arch
@@ -54,8 +64,17 @@ this app, a bare `extract-zip` call outside the app, and a raw `yauzl` + Node `z
 with no disk writes involved at all. A `.NET`-based extraction of the same zip entry, by contrast,
 completed instantly — confirming the zip data itself isn't corrupted.
 
-**Fix**: run `node --version`; if it reports v24 or newer, install Node.js 20 or 22 LTS instead
-(`winget install OpenJS.NodeJS.LTS`), reinstall/rebuild llama-manager, and retry the install.
+**Fix**: run `node --version`; if it reports v24 or newer, install a Node version manager and
+switch to Node 22.x — the "LTS" label alone is no longer a safe indicator (see the prerequisites
+note above). With nvm-windows:
+```powershell
+winget install CoreyButler.NVMforWindows
+# open a new terminal window so PATH changes take effect, then:
+nvm install 22.23.2
+nvm use 22.23.2
+npm install -g llama-manager   # or: npm install -g "<path to your local clone>"
+```
+Verify with `node --version` (should print `v22.x.x`) before retrying the version install.
 
 ## Features
 
