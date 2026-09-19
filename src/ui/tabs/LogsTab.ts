@@ -1,8 +1,10 @@
 import { Control } from "../../framework/Control";
 import { focusManager } from "../../framework/FocusManager";
 import { Section } from "../../framework/widgets/Section";
+import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
 import { LogsViewer } from "../specialized/LogsViewer";
-import { serverLogLines, onServerLog } from "../../lib/server";
+import { serverLogLines, onServerLog, clearServerLog } from "../../lib/server";
+import { fireAsync } from "../../lib/utils";
 import type { TabContext } from "../../lib/tabcontext";
 import type { Size } from "../../framework/types";
 
@@ -19,7 +21,7 @@ export class LogsControl extends Control {
 
     this._section = new Section();
     this._section.title = "Logs";
-    this._section.hint = "scroll to navigate";
+    this._section.hint = "scroll to navigate · c/del clear";
     this._section.flex = 1;
 
     this._logsControl = new LogsViewer({
@@ -64,8 +66,30 @@ export class LogsControl extends Control {
   }
 
   handleKey(key: string): boolean {
+    if (key === "c" || key === "C" || key === "DELETE") {
+      this.clearLogs();
+      return true;
+    }
     if (this._logsControl.handleKey(key)) return true;
     return super.handleKey(key);
+  }
+
+  protected clearLogs(): void {
+    if (!this._ctx) return;
+    if (serverLogLines.length === 0) {
+      this._ctx.showMessage("Log is already empty");
+      return;
+    }
+    fireAsync(async () => {
+      const confirmed = await this._ctx!.openModal<boolean>(createConfirmDialog(
+        "Clear Logs",
+        "Clear all server log output? This cannot be undone.",
+      ));
+      if (!confirmed) return;
+      clearServerLog();
+      this.markDirty();
+      this._ctx?.showMessage("Logs cleared");
+    }, this._ctx);
   }
 }
 

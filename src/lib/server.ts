@@ -42,6 +42,12 @@ export function setMaxLogLines(n: number): void {
   maxLogLines = Math.max(1, n);
 }
 
+/** Clears the in-memory log buffer (does not touch the on-disk log file). */
+export function clearServerLog(): void {
+  serverLogLines.length = 0;
+  logEmitter.emit("log", "");
+}
+
 export function onServerLog(listener: (line: string) => void): () => void {
   logEmitter.on("log", listener);
   return () => { logEmitter.off("log", listener); };
