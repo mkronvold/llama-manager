@@ -2,6 +2,7 @@ import { Control } from "../../framework/Control";
 import { focusManager } from "../../framework/FocusManager";
 import { Section } from "../../framework/widgets/Section";
 import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
+import { createInputDialog } from "../../framework/widgets/InputDialog";
 import { LogsViewer } from "../specialized/LogsViewer";
 import { serverLogLines, onServerLog, clearServerLog } from "../../lib/server";
 import { fireAsync } from "../../lib/utils";
@@ -21,7 +22,7 @@ export class LogsControl extends Control {
 
     this._section = new Section();
     this._section.title = "Logs";
-    this._section.hint = "scroll to navigate · c/del clear · w wrap";
+    this._section.hint = "scroll to navigate · c/del clear · w wrap · f/ find";
     this._section.flex = 1;
 
     this._logsControl = new LogsViewer({
@@ -75,8 +76,46 @@ export class LogsControl extends Control {
       this._ctx?.showMessage(this._logsControl.wrap ? "Wrap: on" : "Wrap: off");
       return true;
     }
+    if (key === "f" || key === "F" || key === "/") {
+      this.openSearch();
+      return true;
+    }
+    if (key === "n" && this._logsControl.searchQuery) {
+      this.reportMatch(this._logsControl.findNext(1));
+      return true;
+    }
+    if (key === "N" && this._logsControl.searchQuery) {
+      this.reportMatch(this._logsControl.findNext(-1));
+      return true;
+    }
+    if (key === "ESCAPE" && this._logsControl.searchQuery) {
+      this._logsControl.clearSearch();
+      this._ctx?.showMessage("Search cleared");
+      return true;
+    }
     if (this._logsControl.handleKey(key)) return true;
     return super.handleKey(key);
+  }
+
+  protected openSearch(): void {
+    if (!this._ctx) return;
+    fireAsync(async () => {
+      const result = await this._ctx!.openModal<string | null>(createInputDialog(
+        "Find in Logs",
+        "search text...",
+        this._logsControl.searchQuery,
+      ));
+      if (result === null) return;
+      this.reportMatch(this._logsControl.setSearchQuery(result));
+    }, this._ctx);
+  }
+
+  protected reportMatch(info: { current: number; total: number } | null): void {
+    if (!info) {
+      this._ctx?.showMessage(`No matches for "${this._logsControl.searchQuery}"`);
+      return;
+    }
+    this._ctx?.showMessage(`Match ${info.current}/${info.total} · n next · N prev · esc clear`);
   }
 
   protected clearLogs(): void {
