@@ -16,6 +16,8 @@ export { DownloadDialog, createDownloadDialog } from "./DownloadDialog";
 export { ExitDialog, createExitDialog } from "./ExitDialog";
 export { SelectorModal, createSelectorModal } from "./SelectorModal";
 export type { SelectorItem } from "./SelectorModal";
+export { MultiSelectModal, createMultiSelectModal } from "./MultiSelectModal";
+export type { MultiSelectItem } from "./MultiSelectModal";
 export { SelectorLabel } from "./SelectorLabel";
 export type { SelectorLabelConfig } from "./SelectorLabel";
 export { GGUFInfoModal, createGGUFInfoModal } from "./GGUFInfoModal";

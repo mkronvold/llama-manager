@@ -11,6 +11,7 @@ import { EditableList, EditableRowInfo, formatFieldValue } from "./EditableList"
 import { createDeviceSelectorModal } from "./DeviceSelectorModal";
 import { createMmprojSelectorModal } from "./MmprojSelectorModal";
 import { createModelSelectorModal } from "./ModelSelectorModal";
+import { MultiSelectModal } from "../../framework/widgets/MultiSelectModal";
 import type { TabContext } from "../../lib/tabcontext";
 import { fireAsync } from "../../lib/utils";
 import { detectForkFromFolder, isForkCompatibleWithPreset, isFieldCompatibleWithFork } from "../../lib/forks";
@@ -76,8 +77,11 @@ export class SettingsPanel extends EditableList {
     for (let catIdx = 0; catIdx < PRESET_CATEGORIES.length; catIdx++) {
       const cat = PRESET_CATEGORIES[catIdx]!;
       if (!isForkCompatibleWithPreset(forkId, cat.presetKey)) continue;
+      const presetData = presets[cat.presetKey];
       const catHasVisible = cat.fields.some(f =>
-        (!f.advanced || this._advancedMode) && isFieldCompatibleWithFork(forkId, f.key, cat.presetKey),
+        (!f.advanced || this._advancedMode) &&
+        isFieldCompatibleWithFork(forkId, f.key, cat.presetKey) &&
+        this.isFieldVisible(f, presetData),
       );
       if (!catHasVisible) continue;
 
@@ -87,6 +91,7 @@ export class SettingsPanel extends EditableList {
           const field = cat.fields[fIdx]!;
           if (field.advanced && !this._advancedMode) continue;
           if (!isFieldCompatibleWithFork(forkId, field.key, cat.presetKey)) continue;
+          if (!this.isFieldVisible(field, presetData)) continue;
           this._rows.push({ type: "field", catIdx, fieldIdx: fIdx, field });
         }
       }
@@ -99,6 +104,16 @@ export class SettingsPanel extends EditableList {
     const presets = this._config.server.profiles[profileName]?.presets;
     const presetData = presets?.[PRESET_CATEGORIES[row.catIdx]!.presetKey];
     return presetData?.[row.field.key];
+  }
+
+  /** True unless the field declares visibleWhenIncludes and the referenced field's
+   *  current comma-separated value doesn't contain any of the required tokens. */
+  protected isFieldVisible(field: PresetFieldDef, presetData: Record<string, unknown> | undefined): boolean {
+    if (!field.visibleWhenIncludes) return true;
+    const { field: depKey, anyOf } = field.visibleWhenIncludes;
+    const depValue = String(presetData?.[depKey] ?? "");
+    const tokens = depValue.split(",").map(t => t.trim()).filter(Boolean);
+    return anyOf.some(v => tokens.includes(v));
   }
 
   protected setRowValue(row: EditableRowInfo, value: unknown): void {
@@ -138,6 +153,8 @@ export class SettingsPanel extends EditableList {
         extra = " (toggle)";
       } else if (isHighlighted && field.type === "enum" && field.options) {
         extra = ` [${field.options.join(" | ")}]`;
+      } else if (isHighlighted && field.type === "multiEnum") {
+        extra = " (enter to select)";
       }
 
       drawEditableField(canvas, keyStr, value, extra, false, isHighlighted, this.focused, width);
@@ -171,6 +188,8 @@ export class SettingsPanel extends EditableList {
           this.openMmprojSelector(row);
         } else if (row.field.key === "model" || row.field.key === "draftModel") {
           this.openModelSelector(row);
+        } else if (row.field.type === "multiEnum") {
+          this.openMultiEnumSelector(row);
         } else {
           this.openDeviceSelector(row);
         }
@@ -291,6 +310,48 @@ export class SettingsPanel extends EditableList {
             this._onMessage?.(`Error saving: ${e}`);
           }
         }
+      }
+    }, ctx);
+  }
+
+  protected openMultiEnumSelector(row: import("./EditableList").EditableRowInfo): void {
+    const config = this._config;
+    const ctx = this._ctx;
+    if (!config || !ctx) return;
+    const field = row.field!;
+    const cat = PRESET_CATEGORIES[row.catIdx]!;
+    const fieldDef = cat.fields.find(f => f.key === field.key);
+    const options = field.options || [];
+
+    fireAsync(async () => {
+      const profileName = this._editingProfile || config.server.activeProfile;
+      const presets = config.server.profiles[profileName]?.presets;
+      const presetData = presets?.[cat.presetKey];
+      const currentValue = String(presetData?.[field.key] ?? "");
+      const currentTokens = currentValue.split(",").map(t => t.trim()).filter(Boolean);
+
+      const modal = new MultiSelectModal();
+      modal.title = `Select ${field.key}`;
+      modal.hint = "tab move · space/enter toggle";
+      modal.setMinSize(30, 8);
+      modal.setMaxSize(80, 26);
+      modal.setItems(options.map(o => ({ id: o, label: o })), currentTokens);
+
+      const result = await ctx.openModal<string[] | null>(modal);
+      if (result !== null) {
+        const joined = result.length > 0 ? result.join(",") : String(fieldDef?.default ?? "none");
+        if (presetData) {
+          presetData[field.key] = joined;
+          try {
+            saveConfig(config);
+            this._onMessage?.(`Set ${field.key} to: ${joined}`);
+          } catch (e) {
+            this._onMessage?.(`Error saving: ${e}`);
+          }
+        }
+        this.buildRows();
+        this.clampSelection();
+        this.markDirty();
       }
     }, ctx);
   }

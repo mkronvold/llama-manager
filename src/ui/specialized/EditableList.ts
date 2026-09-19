@@ -28,6 +28,9 @@ export interface EditableEditState {
 
 export function formatFieldValue(field: EditableFieldDef, value: unknown): string {
   if (value === null || value === undefined) return "(null)";
+  if (field.type === "multiEnum" && typeof value === "string") {
+    return value.split(",").map(v => v.trim()).filter(Boolean).join(", ") || "(none)";
+  }
   return String(value);
 }
 

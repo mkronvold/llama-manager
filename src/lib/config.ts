@@ -65,7 +65,7 @@ async function migrateLegacyWindowsDirs(): Promise<void> {
   }
 }
 
-export type PresetFieldType = "string" | "number" | "boolean" | "enum";
+export type PresetFieldType = "string" | "number" | "boolean" | "enum" | "multiEnum";
 
 export interface PresetFieldDef {
   key: string;
@@ -81,6 +81,10 @@ export interface PresetFieldDef {
   skipValue?: unknown;
   /** When true, pressing ENTER opens a modal instead of text edit. */
   modal?: boolean;
+  /** Hide this field unless another field in the same category currently has one of
+   *  the listed tokens present in its comma-separated value (e.g. only show ngram-mod
+   *  tuning fields when specType includes "ngram-mod"). */
+  visibleWhenIncludes?: { field: string; anyOf: string[] };
 }
 
 export interface PresetCategory {
@@ -140,6 +144,22 @@ export interface ConfigData {
     latestVersion: string | null;
   };
 }
+
+/** Valid --spec-type values per llama.cpp's tools/server/README.md; passed as a
+ *  comma-separated list (e.g. "draft-mtp,ngram-mod") to combine strategies. */
+export const SPEC_TYPE_OPTIONS = [
+  "none",
+  "draft-simple",
+  "draft-eagle3",
+  "draft-mtp",
+  "draft-dflash",
+  "draft-dspark",
+  "ngram-simple",
+  "ngram-map-k",
+  "ngram-map-k4v",
+  "ngram-mod",
+  "ngram-cache",
+];
 
 export const PRESET_CATEGORIES: PresetCategory[] = [
   {
@@ -286,7 +306,7 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
     presetKey: "speculative",
     fields: [
       { key: "draftModel", flag: "--spec-draft-model", type: "string", default: null, description: "Draft model path", advanced: true, modal: true },
-      { key: "specType", flag: "--spec-type", type: "string", default: "none", description: "Comma-separated list: none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache" },
+      { key: "specType", flag: "--spec-type", type: "multiEnum", default: "none", options: SPEC_TYPE_OPTIONS, description: "Speculative decoding strategy/strategies (multi-select)", modal: true },
       { key: "draftNMax", flag: "--spec-draft-n-max", type: "number", default: 3, description: "Max draft tokens" },
       { key: "draftThreads", flag: "--spec-draft-threads", type: "number", default: null, description: "Draft threads", advanced: true },
       { key: "draftGpuLayers", flag: "--spec-draft-gpu-layers", type: "string", default: "auto", description: "Draft GPU layers", advanced: true, skipValue: "auto" },
@@ -296,9 +316,9 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
       { key: "draftHfRepo", flag: "--spec-draft-hf-repo", type: "string", default: null, description: "HF repo for draft model", advanced: true },
       { key: "draftCacheTypeK", flag: "--cache-type-k-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache K type (draft)", advanced: true },
       { key: "draftCacheTypeV", flag: "--cache-type-v-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache V type (draft)", advanced: true },
-      { key: "ngramModNMatch", flag: "--spec-ngram-mod-n-match", type: "number", default: 24, description: "ngram-mod lookup length", advanced: true },
-      { key: "ngramModNMin", flag: "--spec-ngram-mod-n-min", type: "number", default: 48, description: "ngram-mod min ngram tokens", advanced: true },
-      { key: "ngramModNMax", flag: "--spec-ngram-mod-n-max", type: "number", default: 64, description: "ngram-mod max ngram tokens", advanced: true },
+      { key: "ngramModNMatch", flag: "--spec-ngram-mod-n-match", type: "number", default: 24, description: "ngram-mod lookup length", advanced: true, visibleWhenIncludes: { field: "specType", anyOf: ["ngram-mod"] } },
+      { key: "ngramModNMin", flag: "--spec-ngram-mod-n-min", type: "number", default: 48, description: "ngram-mod min ngram tokens", advanced: true, visibleWhenIncludes: { field: "specType", anyOf: ["ngram-mod"] } },
+      { key: "ngramModNMax", flag: "--spec-ngram-mod-n-max", type: "number", default: 64, description: "ngram-mod max ngram tokens", advanced: true, visibleWhenIncludes: { field: "specType", anyOf: ["ngram-mod"] } },
     ],
   },
   {
