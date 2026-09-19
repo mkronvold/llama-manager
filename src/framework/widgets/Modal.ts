@@ -66,6 +66,21 @@ export class Modal extends Control {
     if (this._onClose) this._onClose();
   }
 
+  /**
+   * Default Escape handling for all modals: closes the modal via the same
+   * path as clicking a Cancel/Close button, unless a subclass or a focused
+   * child control already consumed the key (e.g. a text input with its own
+   * cancel action, or a modal that needs custom Escape behavior).
+   */
+  handleKey(key: string): boolean {
+    if (super.handleKey(key)) return true;
+    if (key === "ESCAPE" || key === "ESC") {
+      this.close();
+      return true;
+    }
+    return false;
+  }
+
   protected isPointInside(point: Point): boolean {
     const { x, y, width, height } = this.rect;
     return point.x >= x && point.x < x + width && point.y >= y && point.y < y + height;

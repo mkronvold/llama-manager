@@ -110,8 +110,11 @@ export class TextInput extends Control {
       return true;
     }
     if (key === "ESC" || key === "ESCAPE" || key === "CTRL_C") {
-      if (this._onCancel) this._onCancel();
-      return true;
+      if (this._onCancel) {
+        this._onCancel();
+        return true;
+      }
+      return false; // let the key bubble up (e.g. to a parent Modal's default Escape-to-close)
     }
     if (key === "LEFT") {
       this.cursorPos = Math.max(0, this.cursorPos - 1);

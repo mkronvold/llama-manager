@@ -35,6 +35,7 @@ export class InputDialog extends Modal {
     cancelBtn.setAction(() => this.closeWithResult(null));
 
     this._textInput.setOnSubmit(submit);
+    this._textInput.setOnCancel(() => this.closeWithResult(null));
 
     const buttonRow = createButtonRow(okBtn, cancelBtn);
 

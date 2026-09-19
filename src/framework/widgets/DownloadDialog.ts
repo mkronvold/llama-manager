@@ -113,6 +113,14 @@ export class DownloadDialog extends Modal {
   public closeWithResult(cancelled: boolean): void {
     super.closeWithResult(cancelled);
   }
+
+  handleKey(key: string): boolean {
+    if (key === "ESCAPE" || key === "ESC") {
+      this.closeWithResult(true);
+      return true;
+    }
+    return super.handleKey(key);
+  }
 }
 
 export function createDownloadDialog(fileName: string, status: string = "Preparing..."): DownloadDialog {

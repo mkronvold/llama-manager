@@ -433,7 +433,7 @@ this._hfResultsList.handleKey = (key: string) => {
 
   // --- Key handling ---
   handleKey(key: string): boolean {
-    if (this._view !== "local" && key === "ESC") {
+    if (this._view !== "local" && (key === "ESCAPE" || key === "ESC")) {
       this.goBack();
       return true;
     }
