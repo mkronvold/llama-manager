@@ -387,6 +387,73 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
     fieldMappings: [],
     specificFields: [],
   },
+  unsloth: {
+    id: "unsloth",
+    // Label makes clear in every UI list (Versions tab fork selector, installed
+    // versions table's Fork column, etc.) that this is Unsloth's performance-patched
+    // llama.cpp fork, not vanilla ggml-org/llama.cpp.
+    label: "llama.cpp (Unsloth)",
+    githubRepo: "unslothai/llama.cpp",
+    binaryNames: { linux: "llama-server", macos: "llama-server", win: "llama-server.exe" },
+    // Unsloth's Windows/Linux release assets use an "app-{tag}-{os}-{arch}-{backend}"
+    // naming scheme (distinct from upstream llama.cpp's "llama-{tag}-bin-{os}-{backend}-{arch}"),
+    // and extract flat with no wrapping top-level directory, e.g.:
+    //   app-b11030-mix-5ff778e-windows-x64-cpu.zip
+    //   app-b11030-mix-5ff778e-linux-x64-cuda12-portable.tar.gz
+    // (macOS assets instead use the standard "llama-{tag}-bin-macos-{arch}.tar.gz"
+    // naming and aren't wired up here since they weren't requested.)
+    assetNamePattern: /^app-.+-(windows|linux)-/,
+    extractDirPrefix: null,
+    folderPrefix: "unsloth-",
+    isRawBinary: false,
+    hasListDevices: true,
+    backendVariants: (() => {
+      const matchesOs = (name: string, platform: string, suffix: string): boolean => {
+        if (platform.startsWith("win")) return name.includes(`-windows-x64-${suffix}`);
+        if (platform.startsWith("ubuntu") || platform.startsWith("linux")) return name.includes(`-linux-x64-${suffix}`);
+        return false;
+      };
+      const variants: { id: string; label: string }[] = [
+        { id: "cpu", label: "CPU" },
+        { id: "vulkan", label: "Vulkan" },
+        { id: "cuda12-portable", label: "CUDA 12 (portable)" },
+        { id: "cuda12-newer", label: "CUDA 12 (newer GPUs)" },
+        { id: "cuda12-older", label: "CUDA 12 (older GPUs)" },
+        { id: "cuda12-legacy", label: "CUDA 12 (legacy GPUs)" },
+        { id: "cuda13-portable", label: "CUDA 13 (portable)" },
+        { id: "cuda13-newer", label: "CUDA 13 (newer GPUs)" },
+        { id: "cuda13-older", label: "CUDA 13 (older GPUs)" },
+        { id: "rocm-gfx103X", label: "ROCm gfx103X" },
+        { id: "rocm-gfx110X", label: "ROCm gfx110X" },
+        { id: "rocm-gfx1150", label: "ROCm gfx1150" },
+        { id: "rocm-gfx1151", label: "ROCm gfx1151" },
+        { id: "rocm-gfx120X", label: "ROCm gfx120X" },
+        { id: "rocm-gfx908", label: "ROCm gfx908" },
+        { id: "rocm-gfx90a", label: "ROCm gfx90a" },
+      ];
+      return variants.map(({ id, label }) => ({
+        id,
+        label: `${label} (Unsloth)`,
+        assetMatcher: (name: string, platform: string) => matchesOs(name, platform, id),
+      }));
+    })(),
+    presetCategoryOverrides: null,
+    assetNaming: {
+      pattern: "app-{tag}-{os}-{arch}-{backend}.zip",
+      osTokens: ["windows", "linux"],
+      archTokens: ["x64"],
+      extension: ".zip",
+      isArchive: true,
+      backendSuffixes: [
+        "cpu", "vulkan",
+        "cuda12-portable", "cuda12-newer", "cuda12-older", "cuda12-legacy",
+        "cuda13-portable", "cuda13-newer", "cuda13-older",
+        "rocm-gfx103X", "rocm-gfx110X", "rocm-gfx1150", "rocm-gfx1151", "rocm-gfx120X", "rocm-gfx908", "rocm-gfx90a",
+      ],
+    },
+    fieldMappings: [],
+    specificFields: [],
+  },
 };
 
 export function getFork(id: string): ForkDefinition {
@@ -410,6 +477,7 @@ export function detectForkFromFolder(folderName: string): ForkDefinition {
   if (folderName.startsWith("beellama-")) return getFork("beellama");
   if (folderName.startsWith("llamacpp_rocm-")) return getFork("llamacpp_rocm");
   if (folderName.startsWith("ik_llama-")) return getFork("ik_llama");
+  if (folderName.startsWith("unsloth-")) return getFork("unsloth");
   return getFork("llama.cpp");
 }
 
@@ -449,6 +517,21 @@ export function parseFolderNameV2(name: string): { fork: string; tag: string; ba
     const tag = parts[0] || rest;
     const backend = parts.slice(1).join("-") || "cpu";
     return { fork: "ik_llama", tag, backend };
+  }
+  if (name.startsWith("unsloth-")) {
+    // Unsloth's own tags already contain hyphens (e.g. "b11030-mix-5ff778e"), so the
+    // simple "first segment is the tag" split used by the other forks above doesn't
+    // work here. getFolderName() only appends "-{backend}" when backend isn't
+    // cpu/metal, and known backend ids are also multi-segment (e.g. "cuda12-portable",
+    // "rocm-gfx1151"), so match against the known backend suffix list explicitly.
+    const rest = name.slice("unsloth-".length);
+    const unslothBackends = getFork("unsloth").assetNaming.backendSuffixes;
+    for (const backend of unslothBackends) {
+      if (rest.endsWith(`-${backend}`)) {
+        return { fork: "unsloth", tag: rest.slice(0, rest.length - backend.length - 1), backend };
+      }
+    }
+    return { fork: "unsloth", tag: rest, backend: "cpu" };
   }
   const match = name.match(/^(b\d+)(-.+)?$/);
   if (match) {

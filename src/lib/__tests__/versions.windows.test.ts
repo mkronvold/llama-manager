@@ -80,6 +80,52 @@ const LLAMACPP_ROCM_ASSETS = [
   "llama-b1328-windows-rocm-gfx90a-x64.zip",
 ].map((name) => ({ name }));
 
+// Captured live from unslothai/llama.cpp's GitHub releases API (tag "b11030-mix-5ff778e").
+const UNSLOTH_ASSETS = [
+  "app-b11030-mix-5ff778e-linux-arm64-cpu.tar.gz",
+  "app-b11030-mix-5ff778e-linux-arm64-cuda13-portable.tar.gz",
+  "app-b11030-mix-5ff778e-linux-arm64-vulkan.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cpu.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda12-legacy.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda12-newer.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda12-older.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda12-portable.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda13-newer.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda13-older.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-cuda13-portable.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx103X.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx110X.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx1150.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx1151.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx120X.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx908.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-rocm-gfx90a.tar.gz",
+  "app-b11030-mix-5ff778e-linux-x64-vulkan.tar.gz",
+  "app-b11030-mix-5ff778e-windows-arm64-cpu.zip",
+  "app-b11030-mix-5ff778e-windows-arm64-cuda13-portable.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cpu.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda12-legacy.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda12-newer.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda12-older.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda12-portable.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda13-newer.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda13-older.zip",
+  "app-b11030-mix-5ff778e-windows-x64-cuda13-portable.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx103X.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx110X.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx1150.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx1151.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx120X.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx908.zip",
+  "app-b11030-mix-5ff778e-windows-x64-rocm-gfx90a.zip",
+  "app-b11030-mix-5ff778e-windows-x64-vulkan.zip",
+  "llama-b11030-mix-5ff778e-bin-macos-arm64.tar.gz",
+  "llama-b11030-mix-5ff778e-bin-macos-x64.tar.gz",
+  "llama-prebuilt-manifest.json",
+  "llama-prebuilt-sha256.json",
+  "llama.cpp-source-b11030-mix-5ff778e.tar.gz",
+].map((name) => ({ name }));
+
 describe("getAvailableBackends on win32 (regression: previously returned [])", () => {
   it("finds Windows backends for the default llama.cpp fork", () => {
     const backends = getAvailableBackends("b11036", "win", LLAMA_CPP_ASSETS_B11036, "llama.cpp");
@@ -132,6 +178,21 @@ describe("getAvailableBackends on win32 (regression: previously returned [])", (
     // Ubuntu-only gfx90a build must not leak into the Windows list
     expect(backends.find((b) => b.assetName.includes("ubuntu"))).toBeUndefined();
   });
+
+  it("finds Windows backends for the Unsloth llama.cpp fork (app-{tag}-{os}-{arch}-{backend} naming)", () => {
+    const backends = getAvailableBackends("b11030-mix-5ff778e", "win", UNSLOTH_ASSETS, "unsloth");
+    const ids = backends.map((b) => b.id);
+
+    expect(ids).toContain("cpu");
+    expect(ids).toContain("vulkan");
+    expect(ids).toContain("cuda12-portable");
+    expect(ids).toContain("cuda13-portable");
+    expect(ids).toContain("rocm-gfx1151");
+    // arm64-only assets must not leak into an x64 install's backend list
+    expect(backends.find((b) => b.assetName.includes("arm64"))).toBeUndefined();
+    // Linux-only assets must not leak into the Windows list
+    expect(backends.find((b) => b.assetName.includes("-linux-"))).toBeUndefined();
+  });
 });
 
 describe("getAvailableBackends on non-Windows platforms (no regression)", () => {
@@ -148,5 +209,17 @@ describe("getAvailableBackends on non-Windows platforms (no regression)", () => 
     expect(ids).toContain("cuda");
     expect(ids).toContain("cpu");
     expect(ids).toContain("oldpc");
+  });
+
+  it("still finds Linux backends for the Unsloth llama.cpp fork", () => {
+    const backends = getAvailableBackends("b11030-mix-5ff778e", "ubuntu", UNSLOTH_ASSETS, "unsloth");
+    const ids = backends.map((b) => b.id);
+    expect(ids).toContain("cpu");
+    expect(ids).toContain("vulkan");
+    expect(ids).toContain("cuda12-portable");
+    expect(ids).toContain("cuda13-portable");
+    expect(ids).toContain("rocm-gfx1151");
+    // Windows-only assets must not leak into the Linux list
+    expect(backends.find((b) => b.assetName.includes("-windows-"))).toBeUndefined();
   });
 });

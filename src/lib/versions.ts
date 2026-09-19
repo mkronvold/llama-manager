@@ -17,6 +17,13 @@ export const BACKEND_LABELS: Record<string, string> = {
   cuda: "CUDA",
   cuda12: "CUDA 12",
   cuda13: "CUDA 13",
+  "cuda12-portable": "CUDA 12 (portable)",
+  "cuda12-newer": "CUDA 12 (newer GPUs)",
+  "cuda12-older": "CUDA 12 (older GPUs)",
+  "cuda12-legacy": "CUDA 12 (legacy GPUs)",
+  "cuda13-portable": "CUDA 13 (portable)",
+  "cuda13-newer": "CUDA 13 (newer GPUs)",
+  "cuda13-older": "CUDA 13 (older GPUs)",
   vulkan: "Vulkan",
   rocm: "ROCm",
   "rocm-gfx120X": "ROCm gfx120X",
@@ -311,6 +318,16 @@ function extractBackendFromAsset(
     }
     return null;
   }
+  if (fork.id === "unsloth") {
+    const ext = assetName.endsWith(".tar.gz") ? ".tar.gz" : assetName.endsWith(".zip") ? ".zip" : null;
+    const base = ext ? assetName.slice(0, assetName.length - ext.length) : assetName;
+    for (const variant of fork.backendVariants) {
+      if (variant.assetMatcher(base, platform)) {
+        return variant.id;
+      }
+    }
+    return null;
+  }
   const ext = assetName.endsWith(".tar.gz") ? ".tar.gz" : assetName.endsWith(".zip") ? ".zip" : null;
   if (!ext) return null;
 
@@ -366,7 +383,15 @@ export function getAvailableBackends(
 
     // Check arch + extension for archives
     if (naming.isArchive) {
-      if (!nameLower.endsWith(`${arch}.tar.gz`) && !nameLower.endsWith(`${arch}.zip`)) continue;
+      if (fork.id === "unsloth") {
+        // Unsloth's asset names embed the arch token before the backend suffix,
+        // not immediately before the extension (e.g. "...-windows-x64-cuda12-portable.zip"),
+        // so the generic endsWith(`${arch}.zip`) check below doesn't apply here.
+        if (!nameLower.includes(`-${arch}-`)) continue;
+        if (!nameLower.endsWith(".tar.gz") && !nameLower.endsWith(".zip")) continue;
+      } else if (!nameLower.endsWith(`${arch}.tar.gz`) && !nameLower.endsWith(`${arch}.zip`)) {
+        continue;
+      }
     }
 
     const backend = extractBackendFromAsset(asset.name, version, platform, fork);
