@@ -30,8 +30,11 @@ export class InputDialog extends Modal {
     const okBtn = new Button({ label: "OK" });
     const cancelBtn = new Button({ label: "Cancel" });
 
-    okBtn.setAction(() => this.closeWithResult(this._textInput.value.trim() || null));
+    const submit = () => this.closeWithResult(this._textInput.value.trim() || null);
+    okBtn.setAction(submit);
     cancelBtn.setAction(() => this.closeWithResult(null));
+
+    this._textInput.setOnSubmit(submit);
 
     const buttonRow = createButtonRow(okBtn, cancelBtn);
 
