@@ -161,6 +161,14 @@ export const SPEC_TYPE_OPTIONS = [
   "ngram-cache",
 ];
 
+export const DRAFT_SPEC_TYPE_OPTIONS = [
+  "draft-simple",
+  "draft-eagle3",
+  "draft-mtp",
+  "draft-dflash",
+  "draft-dspark",
+];
+
 /** Common context-size presets (in tokens); ctxSize also accepts any custom
  *  numeric value entered via the "Custom…" option in its selector modal. */
 export const CTX_SIZE_OPTIONS = [
@@ -319,17 +327,17 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
     name: "Speculative",
     presetKey: "speculative",
     fields: [
-      { key: "draftModel", flag: "--spec-draft-model", type: "string", default: null, description: "Draft model path", advanced: true, modal: true },
+      { key: "draftModel", flag: "--spec-draft-model", type: "string", default: null, description: "Draft model path", modal: true, visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
       { key: "specType", flag: "--spec-type", type: "multiEnum", default: "none", options: SPEC_TYPE_OPTIONS, description: "Speculative decoding strategy/strategies (multi-select)", modal: true },
-      { key: "draftNMax", flag: "--spec-draft-n-max", type: "number", default: 3, description: "Max draft tokens" },
-      { key: "draftThreads", flag: "--spec-draft-threads", type: "number", default: null, description: "Draft threads", advanced: true },
-      { key: "draftGpuLayers", flag: "--spec-draft-gpu-layers", type: "string", default: "auto", description: "Draft GPU layers", advanced: true, skipValue: "auto" },
-      { key: "draftNMin", flag: "--spec-draft-n-min", type: "number", default: 0, description: "Min draft tokens", advanced: true },
-      { key: "draftPSplit", flag: "--spec-draft-p-split", type: "number", default: 0.10, description: "Split probability", advanced: true },
-      { key: "draftPMin", flag: "--spec-draft-p-min", type: "number", default: 0.75, description: "Min probability (greedy)", advanced: true },
-      { key: "draftHfRepo", flag: "--spec-draft-hf-repo", type: "string", default: null, description: "HF repo for draft model", advanced: true },
-      { key: "draftCacheTypeK", flag: "--cache-type-k-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache K type (draft)", advanced: true },
-      { key: "draftCacheTypeV", flag: "--cache-type-v-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache V type (draft)", advanced: true },
+      { key: "draftNMax", flag: "--spec-draft-n-max", type: "number", default: 3, description: "Max draft tokens", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftThreads", flag: "--spec-draft-threads", type: "number", default: null, description: "Draft threads", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftGpuLayers", flag: "--spec-draft-gpu-layers", type: "string", default: "auto", description: "Draft GPU layers", skipValue: "auto", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftNMin", flag: "--spec-draft-n-min", type: "number", default: 0, description: "Min draft tokens", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftPSplit", flag: "--spec-draft-p-split", type: "number", default: 0.10, description: "Split probability", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftPMin", flag: "--spec-draft-p-min", type: "number", default: 0.75, description: "Min probability (greedy)", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftHfRepo", flag: "--spec-draft-hf-repo", type: "string", default: null, description: "HF repo for draft model", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftCacheTypeK", flag: "--cache-type-k-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache K type (draft)", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
+      { key: "draftCacheTypeV", flag: "--cache-type-v-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache V type (draft)", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
       { key: "ngramModNMatch", flag: "--spec-ngram-mod-n-match", type: "number", default: 24, description: "ngram-mod lookup length", visibleWhenIncludes: { field: "specType", anyOf: ["ngram-mod"] } },
       { key: "ngramModNMin", flag: "--spec-ngram-mod-n-min", type: "number", default: 48, description: "ngram-mod min ngram tokens", visibleWhenIncludes: { field: "specType", anyOf: ["ngram-mod"] } },
       { key: "ngramModNMax", flag: "--spec-ngram-mod-n-max", type: "number", default: 64, description: "ngram-mod max ngram tokens", visibleWhenIncludes: { field: "specType", anyOf: ["ngram-mod"] } },
