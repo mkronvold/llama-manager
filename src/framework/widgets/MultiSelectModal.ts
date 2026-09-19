@@ -22,6 +22,7 @@ export class MultiSelectModal extends Modal {
   protected _checkboxes: Checkbox[] = [];
   protected _checkboxColumn: Column;
   protected _buttonRow: Row;
+  protected _exclusiveIds = new Set<string>();
 
   constructor() {
     super();
@@ -43,15 +44,34 @@ export class MultiSelectModal extends Modal {
     this.add(column);
   }
 
-  setItems(items: MultiSelectItem[], selectedIds: string[]): void {
+  setItems(items: MultiSelectItem[], selectedIds: string[], exclusiveIds: string[] = []): void {
     this._items = items;
+    this._exclusiveIds = new Set(exclusiveIds);
     this._checkboxColumn.clear();
     this._checkboxes = [];
     const selectedSet = new Set(selectedIds);
     for (const item of items) {
       const cb = new Checkbox({ label: item.label, checked: selectedSet.has(item.id) });
+      cb.setAction((checked) => this.onToggle(item.id, checked));
       this._checkboxes.push(cb);
       this._checkboxColumn.add(cb);
+    }
+  }
+
+  /** Enforces mutual exclusivity: checking an exclusive item (e.g. "none")
+   *  unchecks every other item, and checking any non-exclusive item unchecks
+   *  all exclusive items (since they can't be combined). */
+  protected onToggle(id: string, checked: boolean): void {
+    if (!checked) return;
+    const isExclusive = this._exclusiveIds.has(id);
+    for (let i = 0; i < this._items.length; i++) {
+      const otherId = this._items[i]!.id;
+      if (otherId === id) continue;
+      const otherIsExclusive = this._exclusiveIds.has(otherId);
+      if (isExclusive || otherIsExclusive) {
+        const cb = this._checkboxes[i]!;
+        if (cb.checked) cb.checked = false;
+      }
     }
   }
 
@@ -96,6 +116,7 @@ export function createMultiSelectModal(
   title: string,
   items: MultiSelectItem[],
   selectedIds: string[],
+  exclusiveIds: string[] = [],
 ): Promise<string[] | null> {
   return new Promise((resolve) => {
     const modal = new MultiSelectModal();
@@ -103,7 +124,7 @@ export function createMultiSelectModal(
     modal.hint = "tab move · space/enter toggle";
     modal.setMinSize(30, 8);
     modal.setMaxSize(80, 26);
-    modal.setItems(items, selectedIds);
+    modal.setItems(items, selectedIds, exclusiveIds);
     modal.setResolve(resolve);
     modal.setOnClose(() => modal.closeWithResult(null));
     modalManager.open(modal);

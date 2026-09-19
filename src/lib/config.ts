@@ -85,6 +85,10 @@ export interface PresetFieldDef {
    *  the listed tokens present in its comma-separated value (e.g. only show ngram-mod
    *  tuning fields when specType includes "ngram-mod"). */
   visibleWhenIncludes?: { field: string; anyOf: string[] };
+  /** For multiEnum fields: option ids in this list are mutually exclusive with all
+   *  other options (e.g. "none" cannot be combined with "draft-mtp"). Selecting one
+   *  of these deselects everything else, and selecting anything else deselects these. */
+  exclusiveOptions?: string[];
 }
 
 export interface PresetCategory {
@@ -328,7 +332,7 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
     presetKey: "speculative",
     fields: [
       { key: "draftModel", flag: "--spec-draft-model", type: "string", default: null, description: "Draft model path", modal: true, visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
-      { key: "specType", flag: "--spec-type", type: "multiEnum", default: "none", options: SPEC_TYPE_OPTIONS, description: "Speculative decoding strategy/strategies (multi-select)", modal: true },
+      { key: "specType", flag: "--spec-type", type: "multiEnum", default: "none", options: SPEC_TYPE_OPTIONS, description: "Speculative decoding strategy/strategies (multi-select)", modal: true, exclusiveOptions: ["none"] },
       { key: "draftNMax", flag: "--spec-draft-n-max", type: "number", default: 3, description: "Max draft tokens", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
       { key: "draftThreads", flag: "--spec-draft-threads", type: "number", default: null, description: "Draft threads", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },
       { key: "draftGpuLayers", flag: "--spec-draft-gpu-layers", type: "string", default: "auto", description: "Draft GPU layers", skipValue: "auto", visibleWhenIncludes: { field: "specType", anyOf: DRAFT_SPEC_TYPE_OPTIONS } },

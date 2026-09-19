@@ -340,7 +340,7 @@ export class SettingsPanel extends EditableList {
       modal.hint = "tab move · space/enter toggle";
       modal.setMinSize(30, 8);
       modal.setMaxSize(80, 26);
-      modal.setItems(options.map(o => ({ id: o, label: o })), currentTokens);
+      modal.setItems(options.map(o => ({ id: o, label: o })), currentTokens, fieldDef?.exclusiveOptions || []);
 
       const result = await ctx.openModal<string[] | null>(modal);
       if (result !== null) {
