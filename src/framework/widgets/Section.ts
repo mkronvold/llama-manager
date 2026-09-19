@@ -7,6 +7,12 @@ export class Section extends Control {
   backgroundColor = "surface" as Color;
   public title = "";
   public hint = "";
+  /** When false, omits the left vertical border bar. Useful for content
+   *  panels (e.g. the Logs viewer) where users frequently drag-select
+   *  multi-line text to copy for troubleshooting - a decorative border
+   *  character at the start of every row gets swept into that selection
+   *  and pollutes the clipboard contents. */
+  public showLeftBorder = true;
 
   measure(parentSize?: Size): Size {
     const p = parentSize || { width: this.rect.width || 80, height: this.rect.height || 4 };
@@ -80,10 +86,12 @@ export class Section extends Control {
     drawTitleBar(canvas, x, y + 1, width, this.title, this.hint);
 
     // Left border
-    for (let row = 2; row < height - 1; row++) {
-      canvas.moveTo(x, y + row);
-      canvas.setForegroundColor("borderMuted");
-      canvas.write(V);
+    if (this.showLeftBorder) {
+      for (let row = 2; row < height - 1; row++) {
+        canvas.moveTo(x, y + row);
+        canvas.setForegroundColor("borderMuted");
+        canvas.write(V);
+      }
     }
 
     // Bottom padding row

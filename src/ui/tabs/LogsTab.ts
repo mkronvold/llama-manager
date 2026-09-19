@@ -24,6 +24,10 @@ export class LogsControl extends Control {
     this._section.title = "Logs";
     this._section.hint = "scroll to navigate · c/del clear · w wrap · f/ find";
     this._section.flex = 1;
+    // Logs are frequently multi-line-selected in the terminal to copy for
+    // troubleshooting; the decorative left border bar would get swept into
+    // that selection on every row, so it's disabled here.
+    this._section.showLeftBorder = false;
 
     this._logsControl = new LogsViewer({
       getLines: () => serverLogLines,
