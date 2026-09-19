@@ -228,4 +228,13 @@ export class LlamaManagerApp {
       stopServer().catch(() => {});
     }
   }
+
+  /**
+   * Forces a full repaint of the entire screen. Used after recovering from a
+   * swallowed input-handling crash (e.g. a terminal-kit mouse-protocol bug)
+   * where stray output may have reached the terminal mid-frame.
+   */
+  forceRedraw(): void {
+    if (this._app) this._app.markAllDirty();
+  }
 }
