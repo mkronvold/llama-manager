@@ -8,7 +8,7 @@ const HELP_SECTIONS = [
   {
     title: "Navigation",
     keys: [
-      ["1-7", "Switch tabs"],
+      ["1-8", "Switch tabs"],
       ["Alt+Right", "Next tab"],
       ["Alt+Left", "Previous tab"],
       ["Tab / Shift+Tab", "Move focus"],
@@ -32,10 +32,11 @@ const HELP_SECTIONS = [
       ["1", "Dashboard - metrics and server control"],
       ["2", "Logs - live server log viewer"],
       ["3", "Tasks - inference task history"],
-      ["4", "Profiles - preset editing and management"],
-      ["5", "Versions - install and switch llama.cpp builds"],
-      ["6", "Models - browse, download, and manage GGUF models"],
-      ["7", "Options - global application settings"],
+      ["4", "System - CPU, RAM, and GPU/VRAM usage"],
+      ["5", "Profiles - preset editing and management"],
+      ["6", "Versions - install and switch llama.cpp builds"],
+      ["7", "Models - browse, download, and manage GGUF models"],
+      ["8", "Options - global application settings"],
     ],
   },
 ];

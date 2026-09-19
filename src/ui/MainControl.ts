@@ -17,9 +17,10 @@ import { createDashboardTab } from "./tabs/DashboardTab";
 import { createLogsTab } from "./tabs/LogsTab";
 import { createModelsTab } from "./tabs/ModelsTab";
 import { createOptionsTab } from "./tabs/OptionsTab";
+import { createSystemTab } from "./tabs/SystemTab";
 import { focusManager } from "../framework/FocusManager";
 
-export const TABS = ["Dashboard", "Logs", "Tasks", "Profiles", "Versions", "Models", "Options"] as const;
+export const TABS = ["Dashboard", "Logs", "Tasks", "System", "Profiles", "Versions", "Models", "Options"] as const;
 export type TabId = (typeof TABS)[number];
 
 export class MainControl extends Column {
@@ -155,10 +156,10 @@ export class MainControl extends Column {
       return true;
     }
 
-    // 1-7 switch tabs (only when no text input is focused)
+    // 1-8 switch tabs (only when no text input is focused)
     if (!focusManager.isTextInputActive()) {
       const idx = parseInt(key, 10);
-      if (idx >= 1 && idx <= 7) {
+      if (idx >= 1 && idx <= TABS.length) {
         this.setActiveTab(TABS[idx - 1]);
         return true;
       }
@@ -259,8 +260,8 @@ class TabBar extends Control {
       }
       pos += labelLen;
       if (i < TABS.length - 1) {
-      fg(canvas, "borderMuted", "  ·  ");
-        pos += 5;
+      fg(canvas, "borderMuted", " · ");
+        pos += 3;
       }
     }
 
@@ -303,6 +304,7 @@ class TabContent extends Control {
       Logs: createLogsTab,
       Profiles: createServerTab,
       Tasks: createTasksTab,
+      System: createSystemTab,
       Versions: createVersionsTab,
       Models: createModelsTab,
       Options: createOptionsTab,
@@ -477,7 +479,7 @@ class StatusBar extends Control {
         fg(canvas, "textMuted", ` (PID ${this._serverPid}, ${formatUptime(this._serverUptime)})`);
       }
       fg(canvas, "borderMuted", "  ·  ");
-      fg(canvas, "textMuted", "1-7 navigate");
+      fg(canvas, "textMuted", "1-8 navigate");
       fg(canvas, "borderMuted", "  ·  ");
       fg(canvas, "textMuted", "q quit");
       fg(canvas, "borderMuted", "  ·  ");
