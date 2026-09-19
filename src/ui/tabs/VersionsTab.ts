@@ -171,6 +171,7 @@ export class VersionsControl extends Control {
 
     this._versionsSection = new Section();
     this._versionsSection.title = "Installed Versions";
+    this._versionsSection.hint = "ins install · del delete";
     this._versionsSection.add(this._table);
 
     this._changelog = new ChangelogView();
@@ -250,6 +251,10 @@ export class VersionsControl extends Control {
         const config = ctx.getConfig();
         if (!config) throw new Error("No config loaded");
         const version = (selected.data as VersionInfo).version;
+        if (version === config.activeVersion) {
+          ctx.showMessage(`Cannot delete ${version}: it is the active version. Switch to a different version first.`);
+          return;
+        }
         const confirmed = await ctx.openModal<boolean>(createConfirmDialog(
           "Delete Version",
           `Delete ${version}? This will remove all files for this version.`
@@ -288,6 +293,14 @@ export class VersionsControl extends Control {
         }, ctx);
         return true;
       }
+      if (this._mode === "local" && key === "INSERT") {
+        this._btnInstall.trigger();
+        return true;
+      }
+      if (this._mode === "local" && key === "DELETE") {
+        this._btnDelete.trigger();
+        return true;
+      }
       return tableHandleKey(key);
     };
 
@@ -299,7 +312,7 @@ export class VersionsControl extends Control {
   }
 
   handleKey(key: string): boolean {
-    if (this._mode !== "local" && key === "ESC") {
+    if (this._mode !== "local" && (key === "ESCAPE" || key === "ESC")) {
       fireAsync(async () => {
         await this.goBack();
       }, this._ctx!);
@@ -350,6 +363,7 @@ export class VersionsControl extends Control {
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Installed Versions";
+    this._versionsSection.hint = "ins install · del delete";
     this._changelogSection.visible = false;
     this._btnBack.visible = false;
     this._forkButton.visible = false;
@@ -367,6 +381,7 @@ export class VersionsControl extends Control {
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Select version";
+    this._versionsSection.hint = "";
     this._btnBack.visible = true;
     this._btnInstall.visible = false;
     this._btnDelete.visible = false;
@@ -413,6 +428,7 @@ export class VersionsControl extends Control {
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Select backend";
+    this._versionsSection.hint = "";
     this._changelogSection.visible = false;
     this._btnBack.visible = true;
     this._btnInstall.visible = false;
@@ -513,8 +529,12 @@ export class VersionsControl extends Control {
         }
       }
 
+      this._table.setOnHighlight((item) => {
+        this._btnDelete.disabled = !item || (item.data as VersionInfo).active;
+      });
+
       const sel = this._table.getSelectedItem();
-      this._btnDelete.disabled = !sel || !(sel.data as VersionInfo).active;
+      this._btnDelete.disabled = !sel || (sel.data as VersionInfo).active;
       this.markDirty();
     } catch (err: any) {
       // ignore

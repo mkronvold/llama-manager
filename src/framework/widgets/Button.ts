@@ -91,6 +91,11 @@ export class Button extends Control {
     this._action = action;
   }
 
+  /** Invokes the button's action directly (bypassing focus/disabled), for keyboard shortcuts. */
+  trigger(): void {
+    if (this._action) this._action();
+  }
+
   onMouseDown(_point: Point): boolean {
     this._pressed = true;
     return true;
