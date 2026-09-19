@@ -115,7 +115,7 @@ export class VersionsControl extends Control {
     this._table.columns = [
       {
         label: "Tag",
-        width: 14,
+        width: 8,
         flex: 1,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
