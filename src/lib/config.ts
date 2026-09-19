@@ -286,7 +286,7 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
     presetKey: "speculative",
     fields: [
       { key: "draftModel", flag: "--spec-draft-model", type: "string", default: null, description: "Draft model path", advanced: true, modal: true },
-      { key: "specType", flag: "--spec-type", type: "string", default: "none", description: "Spec type" },
+      { key: "specType", flag: "--spec-type", type: "string", default: "none", description: "Comma-separated list: none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache" },
       { key: "draftNMax", flag: "--spec-draft-n-max", type: "number", default: 3, description: "Max draft tokens" },
       { key: "draftThreads", flag: "--spec-draft-threads", type: "number", default: null, description: "Draft threads", advanced: true },
       { key: "draftGpuLayers", flag: "--spec-draft-gpu-layers", type: "string", default: "auto", description: "Draft GPU layers", advanced: true, skipValue: "auto" },
@@ -296,6 +296,9 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
       { key: "draftHfRepo", flag: "--spec-draft-hf-repo", type: "string", default: null, description: "HF repo for draft model", advanced: true },
       { key: "draftCacheTypeK", flag: "--cache-type-k-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache K type (draft)", advanced: true },
       { key: "draftCacheTypeV", flag: "--cache-type-v-draft", type: "enum", default: "f16", options: ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], description: "KV cache V type (draft)", advanced: true },
+      { key: "ngramModNMatch", flag: "--spec-ngram-mod-n-match", type: "number", default: 24, description: "ngram-mod lookup length", advanced: true },
+      { key: "ngramModNMin", flag: "--spec-ngram-mod-n-min", type: "number", default: 48, description: "ngram-mod min ngram tokens", advanced: true },
+      { key: "ngramModNMax", flag: "--spec-ngram-mod-n-max", type: "number", default: 64, description: "ngram-mod max ngram tokens", advanced: true },
     ],
   },
   {
@@ -452,6 +455,9 @@ const DEFAULT_PRESETS: ServerPresets = {
     draftHfRepo: null,
     draftCacheTypeK: "f16",
     draftCacheTypeV: "f16",
+    ngramModNMatch: 24,
+    ngramModNMin: 48,
+    ngramModNMax: 64,
   },
   reasoning: {
     reasoning: "auto",

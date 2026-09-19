@@ -271,6 +271,9 @@ const FORK_REGISTRY: Record<string, ForkDefinition> = {
       { fieldKey: "draftHfRepo", categoryKey: "speculative", flag: null },
       { fieldKey: "draftCacheTypeK", categoryKey: "speculative", flag: null },
       { fieldKey: "draftCacheTypeV", categoryKey: "speculative", flag: null },
+      { fieldKey: "ngramModNMatch", categoryKey: "speculative", flag: null },
+      { fieldKey: "ngramModNMin", categoryKey: "speculative", flag: null },
+      { fieldKey: "ngramModNMax", categoryKey: "speculative", flag: null },
     ],
     specificFields: [
       { key: "useCuda", flag: "--usecuda", type: "boolean", default: false, description: "Use CUDA acceleration", categoryKey: "gpu" },
