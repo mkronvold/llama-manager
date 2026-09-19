@@ -31,6 +31,13 @@ export function formatFieldValue(field: EditableFieldDef, value: unknown): strin
   if (field.type === "multiEnum" && typeof value === "string") {
     return value.split(",").map(v => v.trim()).filter(Boolean).join(", ") || "(none)";
   }
+  if (field.type === "sizeEnum") {
+    const n = Number(value);
+    if (!isNaN(n)) {
+      if (n === 0) return "0 (model default)";
+      if (n % 1024 === 0) return `${n} (${n / 1024}k)`;
+    }
+  }
   return String(value);
 }
 
@@ -45,6 +52,7 @@ export function parseEditableValue(type: PresetFieldType | "string" | "number" |
 
   switch (type) {
     case "number":
+    case "sizeEnum":
       const n = Number(trimmed);
       if (isNaN(n)) return null;
       return n;

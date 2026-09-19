@@ -65,7 +65,7 @@ async function migrateLegacyWindowsDirs(): Promise<void> {
   }
 }
 
-export type PresetFieldType = "string" | "number" | "boolean" | "enum" | "multiEnum";
+export type PresetFieldType = "string" | "number" | "boolean" | "enum" | "multiEnum" | "sizeEnum";
 
 export interface PresetFieldDef {
   key: string;
@@ -161,6 +161,20 @@ export const SPEC_TYPE_OPTIONS = [
   "ngram-cache",
 ];
 
+/** Common context-size presets (in tokens); ctxSize also accepts any custom
+ *  numeric value entered via the "Custom…" option in its selector modal. */
+export const CTX_SIZE_OPTIONS = [
+  "0",
+  "8192",
+  "32768",
+  "65536",
+  "98304",
+  "131072",
+  "163840",
+  "196608",
+  "262144",
+];
+
 export const PRESET_CATEGORIES: PresetCategory[] = [
   {
     name: "Server",
@@ -232,7 +246,7 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
     fields: [
       { key: "threads", flag: "--threads", type: "number", default: -1, description: "CPU threads" },
       { key: "threadsBatch", flag: "--threads-batch", type: "number", default: null, description: "Batch threads", advanced: true },
-      { key: "ctxSize", flag: "--ctx-size", type: "number", default: 0, description: "Context size (0=model)" },
+      { key: "ctxSize", flag: "--ctx-size", type: "sizeEnum", default: 0, options: CTX_SIZE_OPTIONS, modal: true, description: "Context size (0=model, or custom)" },
       { key: "batchSize", flag: "--batch-size", type: "number", default: 2048, description: "Max batch size" },
       { key: "ubatchSize", flag: "--ubatch-size", type: "number", default: 512, description: "Physical batch size", advanced: true },
       { key: "flashAttn", flag: "--flash-attn", type: "enum", default: "auto", options: ["on", "off", "auto"], description: "Flash Attention" },

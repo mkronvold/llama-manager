@@ -12,6 +12,7 @@ import { createDeviceSelectorModal } from "./DeviceSelectorModal";
 import { createMmprojSelectorModal } from "./MmprojSelectorModal";
 import { createModelSelectorModal } from "./ModelSelectorModal";
 import { MultiSelectModal } from "../../framework/widgets/MultiSelectModal";
+import { SelectorModal, SelectorItem } from "../../framework/widgets/SelectorModal";
 import type { TabContext } from "../../lib/tabcontext";
 import { fireAsync } from "../../lib/utils";
 import { detectForkFromFolder, isForkCompatibleWithPreset, isFieldCompatibleWithFork } from "../../lib/forks";
@@ -155,6 +156,8 @@ export class SettingsPanel extends EditableList {
         extra = ` [${field.options.join(" | ")}]`;
       } else if (isHighlighted && field.type === "multiEnum") {
         extra = " (enter to select)";
+      } else if (isHighlighted && field.type === "sizeEnum") {
+        extra = " (enter to select)";
       }
 
       drawEditableField(canvas, keyStr, value, extra, false, isHighlighted, this.focused, width);
@@ -190,6 +193,8 @@ export class SettingsPanel extends EditableList {
           this.openModelSelector(row);
         } else if (row.field.type === "multiEnum") {
           this.openMultiEnumSelector(row);
+        } else if (row.field.type === "sizeEnum") {
+          this.openSizeSelector(row);
         } else {
           this.openDeviceSelector(row);
         }
@@ -355,4 +360,61 @@ export class SettingsPanel extends EditableList {
       }
     }, ctx);
   }
+
+  protected openSizeSelector(row: import("./EditableList").EditableRowInfo): void {
+    const config = this._config;
+    const ctx = this._ctx;
+    if (!config || !ctx) return;
+    const field = row.field!;
+    const cat = PRESET_CATEGORIES[row.catIdx]!;
+    const options = field.options || [];
+
+    fireAsync(async () => {
+      const profileName = this._editingProfile || config.server.activeProfile;
+      const presets = config.server.profiles[profileName]?.presets;
+      const presetData = presets?.[cat.presetKey];
+      const currentValue = String(presetData?.[field.key] ?? "");
+
+      const items: SelectorItem[] = options.map(o => ({ id: o, label: formatSizeOptionLabel(o) }));
+      items.push({ id: "__custom__", label: "Custom…" });
+
+      const modal = new SelectorModal();
+      modal.title = `Select ${field.key}`;
+      modal.hint = "enter confirm";
+      modal.setMinSize(30, 8);
+      modal.setMaxSize(60, 16);
+      modal.setItems(items, options.includes(currentValue) ? currentValue : null);
+
+      const result = await ctx.openModal<string | null>(modal);
+      if (result === "__custom__") {
+        this.startEdit(row);
+        return;
+      }
+      if (result !== null) {
+        const parsed = Number(result);
+        if (presetData) {
+          presetData[field.key] = parsed;
+          try {
+            saveConfig(config);
+            this._onMessage?.(`Set ${field.key} to: ${parsed}`);
+          } catch (e) {
+            this._onMessage?.(`Error saving: ${e}`);
+          }
+        }
+        this.buildRows();
+        this.clampSelection();
+        this.markDirty();
+      }
+    }, ctx);
+  }
+}
+
+/** Formats a ctxSize-style numeric option string as a human-friendly label,
+ *  e.g. "8192" -> "8k (8192)", "0" -> "Model default (0)". */
+function formatSizeOptionLabel(value: string): string {
+  const n = Number(value);
+  if (isNaN(n)) return value;
+  if (n === 0) return "Model default (0)";
+  if (n % 1024 === 0) return `${n / 1024}k (${n})`;
+  return String(n);
 }
