@@ -1,6 +1,7 @@
 import { Scrollable } from "../../framework/widgets/Scrollable";
 import { fg } from "../../lib/theme";
-import { renderLogLine } from "../../lib/logcolors";
+import { renderLogLine, renderLogSegments, wrapLogLine } from "../../lib/logcolors";
+import type { LogSegment } from "../../lib/logcolors";
 import type { Point, Size, RenderContext } from "../../framework/types";
 
 export interface LogsViewerConfig {
@@ -12,10 +13,23 @@ export class LogsViewer extends Scrollable {
   focusable = true;
   protected _config: LogsViewerConfig;
   protected _autoScroll = true;
+  protected _wrap = false;
+  protected _wrappedRows: LogSegment[][] = [];
+  protected _wrapWidth = 0;
+  protected _wrapLineCount = -1;
 
   constructor(config: LogsViewerConfig) {
     super();
     this._config = config;
+  }
+
+  get wrap(): boolean { return this._wrap; }
+
+  toggleWrap(): void {
+    this._wrap = !this._wrap;
+    this._wrapWidth = 0; // force rewrap on next layout
+    this._wrapLineCount = -1;
+    this.markDirty();
   }
 
   measure(parentSize?: Size): Size {
@@ -26,7 +40,18 @@ export class LogsViewer extends Scrollable {
     this._viewportHeight = this.rect.height;
     const lines = this._config.getLines();
     const prevContentHeight = this.contentHeight;
-    this.contentHeight = lines.length;
+
+    if (this._wrap) {
+      const cw = this.contentWidth;
+      if (cw !== this._wrapWidth || lines.length !== this._wrapLineCount) {
+        this._wrapWidth = cw;
+        this._wrapLineCount = lines.length;
+        this._wrappedRows = lines.flatMap((line) => wrapLogLine(line, cw));
+      }
+      this.contentHeight = this._wrappedRows.length;
+    } else {
+      this.contentHeight = lines.length;
+    }
 
     const maxScroll = this.maxScrollOffset;
     if (this._autoScroll || this.scrollOffset > maxScroll) {
@@ -53,8 +78,7 @@ export class LogsViewer extends Scrollable {
 
     if (height <= 0) return;
 
-    const lines = this._config.getLines();
-    const totalLines = lines.length;
+    const totalLines = this._wrap ? this._wrappedRows.length : this._config.getLines().length;
     const cw = this.contentWidth;
 
     if (totalLines === 0 && this._config.emptyMessage) {
@@ -62,7 +86,15 @@ export class LogsViewer extends Scrollable {
       const pad = Math.max(0, Math.floor((cw - this._config.emptyMessage.length) / 2));
       canvas.moveTo(x + pad, midY);
       fg(canvas, "textMuted", this._config.emptyMessage);
+    } else if (this._wrap) {
+      for (let i = 0; i < height; i++) {
+        const lineIdx = this.scrollOffset + i;
+        if (lineIdx >= 0 && lineIdx < totalLines) {
+          renderLogSegments(canvas, x, y + i, cw, this._wrappedRows[lineIdx]!);
+        }
+      }
     } else {
+      const lines = this._config.getLines();
       for (let i = 0; i < height; i++) {
         const lineIdx = this.scrollOffset + i;
         if (lineIdx >= 0 && lineIdx < totalLines) {

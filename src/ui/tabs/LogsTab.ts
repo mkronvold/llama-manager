@@ -21,7 +21,7 @@ export class LogsControl extends Control {
 
     this._section = new Section();
     this._section.title = "Logs";
-    this._section.hint = "scroll to navigate · c/del clear";
+    this._section.hint = "scroll to navigate · c/del clear · w wrap";
     this._section.flex = 1;
 
     this._logsControl = new LogsViewer({
@@ -68,6 +68,11 @@ export class LogsControl extends Control {
   handleKey(key: string): boolean {
     if (key === "c" || key === "C" || key === "DELETE") {
       this.clearLogs();
+      return true;
+    }
+    if (key === "w" || key === "W") {
+      this._logsControl.toggleWrap();
+      this._ctx?.showMessage(this._logsControl.wrap ? "Wrap: on" : "Wrap: off");
       return true;
     }
     if (this._logsControl.handleKey(key)) return true;

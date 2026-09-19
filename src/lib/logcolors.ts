@@ -40,6 +40,11 @@ export function parseLogLine(line: string): LogSegment[] {
 export function renderLogLine(canvas: FramebufferCanvas, x: number, y: number, width: number, line: string): void {
   canvas.moveTo(x, y);
   const segments = parseLogLine(line);
+  renderLogSegments(canvas, x, y, width, segments);
+}
+
+export function renderLogSegments(canvas: FramebufferCanvas, x: number, y: number, width: number, segments: LogSegment[]): void {
+  canvas.moveTo(x, y);
   let remainingWidth = width;
 
   for (const seg of segments) {
@@ -48,4 +53,35 @@ export function renderLogLine(canvas: FramebufferCanvas, x: number, y: number, w
     fg(canvas, seg.color, truncated);
     remainingWidth -= truncated.length;
   }
+}
+
+/** Splits a log line's colored segments into rows that each fit within `width`
+ *  columns, preserving segment coloring across the wrap boundaries. Used by the
+ *  Logs viewer's word-wrap mode; a line shorter than `width` yields a single row. */
+export function wrapLogLine(line: string, width: number): LogSegment[][] {
+  if (width <= 0) return [parseLogLine(line)];
+  const segments = parseLogLine(line);
+  const rows: LogSegment[][] = [];
+  let current: LogSegment[] = [];
+  let currentWidth = 0;
+
+  for (const seg of segments) {
+    let text = seg.text;
+    while (text.length > 0) {
+      const space = width - currentWidth;
+      if (space <= 0) {
+        rows.push(current);
+        current = [];
+        currentWidth = 0;
+        continue;
+      }
+      const chunk = text.substring(0, space);
+      current.push({ text: chunk, color: seg.color });
+      currentWidth += chunk.length;
+      text = text.substring(chunk.length);
+    }
+  }
+
+  if (current.length > 0 || rows.length === 0) rows.push(current);
+  return rows;
 }
