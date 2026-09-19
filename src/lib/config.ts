@@ -260,7 +260,7 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
       { key: "threadsBatch", flag: "--threads-batch", type: "number", default: null, description: "Batch threads", advanced: true },
       { key: "ctxSize", flag: "--ctx-size", type: "sizeEnum", default: 0, options: CTX_SIZE_OPTIONS, modal: true, description: "Context size (0=model, or custom)" },
       { key: "batchSize", flag: "--batch-size", type: "number", default: 2048, description: "Max batch size" },
-      { key: "ubatchSize", flag: "--ubatch-size", type: "number", default: 512, description: "Physical batch size", advanced: true },
+      { key: "ubatchSize", flag: "--ubatch-size", type: "number", default: 512, description: "Physical batch size" },
       { key: "flashAttn", flag: "--flash-attn", type: "enum", default: "auto", options: ["on", "off", "auto"], description: "Flash Attention" },
       { key: "mlock", flag: "--mlock", type: "boolean", default: false, description: "Lock model in RAM" },
       { key: "mmap", flag: "--mmap", type: "boolean", default: true, description: "Memory-map model", negate: true },
