@@ -1,2 +1,7 @@
 node_modules/
 dist/
+
+# Model files and unrelated data that must never be committed to this
+# source repo (large binaries would break the repo / GitHub's size limits).
+*.gguf
+/unsloth/

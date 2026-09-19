@@ -126,7 +126,7 @@ export function createDeviceSelectorModal(config: ConfigData): DeviceSelectorMod
   modal.title = "Select Device";
   modal.hint = "enter confirm";
   modal.setMinSize(60, 12);
-  modal.setMaxSize(100, 30);
+  modal.setMaxSize(120, 30);
   modal.setConfig(config);
   return modal;
 }

@@ -243,8 +243,8 @@ export class SettingsPanel extends EditableList {
       modal.setItems(items, currentMmproj);
       modal.title = "Select mmproj file";
       modal.hint = "enter confirm";
-      modal.setMinSize(40, 8);
-      modal.setMaxSize(80, 22);
+      modal.setMinSize(60, 8);
+      modal.setMaxSize(120, 22);
 
       const result = await ctx.openModal<string | null>(modal);
       if (result !== null) {

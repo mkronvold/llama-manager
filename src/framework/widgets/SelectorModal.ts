@@ -3,6 +3,7 @@ import { Column, Row, createButtonRow } from "../Layout";
 import { Button } from "./Button";
 import { List, ListItem } from "./List";
 import { Spacer } from "./Spacer";
+import { StyledText } from "./StyledText";
 import { modalManager } from "../ModalManager";
 import { focusManager } from "../FocusManager";
 import type { Size } from "../types";
@@ -13,11 +14,15 @@ export interface SelectorItem {
   sublabel?: string;
 }
 
+/** Width overhead added by modal borders/padding and the list's scrollbar column. */
+const CHROME_WIDTH = 6;
+
 export class SelectorModal extends Modal {
   protected _items: SelectorItem[] = [];
   protected _selectedId: string | null = null;
   protected _list: List<string, SelectorItem>;
   protected _buttonRow: Row;
+  protected _preview: StyledText;
 
   setItems(items: SelectorItem[], selectedId: string | null): void {
     this._items = items;
@@ -31,13 +36,19 @@ export class SelectorModal extends Modal {
     this._list.selectedId = selectedId;
     const idx = items.findIndex((i) => i.id === selectedId);
     this._list.selectedIndex = idx >= 0 ? idx : 0;
+    this.updatePreview();
   }
 
   constructor() {
     super();
     this._list = new List();
     this._list.flex = 1;
+    this._list.truncate = "head";
     this._list.setOnSelect(() => this.confirm());
+    this._list.setOnHighlight(() => this.updatePreview());
+
+    this._preview = new StyledText();
+    this._preview.truncate = "head";
 
     const okBtn = new Button({ label: "OK" });
     const cancelBtn = new Button({ label: "Cancel" });
@@ -49,6 +60,9 @@ export class SelectorModal extends Modal {
 
     const column = new Column();
     column.add(this._list);
+    const midSpacer = new Spacer();
+    column.add(midSpacer);
+    column.add(this._preview);
     const bottomSpacer = new Spacer();
     column.add(bottomSpacer);
     column.add(this._buttonRow);
@@ -56,9 +70,30 @@ export class SelectorModal extends Modal {
     this.add(column);
   }
 
+  /** Shows the full, untruncated-as-possible name of the highlighted item so long
+   *  filenames remain identifiable even when the list column truncates them. */
+  protected updatePreview(): void {
+    const item = this._list.getSelectedItem();
+    this._preview.builder.text("");
+    if (item) {
+      this._preview.builder.accentColor(item.label);
+      if (item.sublabel) {
+        this._preview.builder.muted(`  ${item.sublabel}`);
+      }
+    }
+    this.markDirty();
+  }
+
   measure(parentSize?: Size): Size {
-    const w = Math.max(this._minWidth, 40);
-    const h = Math.max(this._minHeight, Math.min(this._items.length + 6, 22));
+    let widest = 0;
+    for (const item of this._items) {
+      const len = item.label.length + (item.sublabel ? item.sublabel.length + 2 : 0);
+      if (len > widest) widest = len;
+    }
+    const contentWidth = widest + CHROME_WIDTH;
+    const availableWidth = parentSize ? parentSize.width - 4 : this._maxWidth;
+    const w = Math.max(this._minWidth, Math.min(contentWidth, this._maxWidth, availableWidth));
+    const h = Math.max(this._minHeight, Math.min(this._items.length + 8, 22));
     return this._clampSize({ width: w, height: h });
   }
 
