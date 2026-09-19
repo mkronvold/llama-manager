@@ -33,6 +33,12 @@ import type { Size, RenderContext } from "../../framework/types";
 
 type ViewMode = "local" | "releases" | "backends" | "installing";
 
+interface UpdateCandidate {
+  current: VersionInfo;
+  release: RemoteVersion;
+  backend: AvailableBackend;
+}
+
 class ChangelogView extends Scrollable {
   protected _lines: string[] = [];
 
@@ -171,7 +177,7 @@ export class VersionsControl extends Control {
 
     this._versionsSection = new Section();
     this._versionsSection.title = "Installed Versions";
-    this._versionsSection.hint = "ins install · del delete";
+    this._versionsSection.hint = "ins install · u update · a all · del delete";
     this._versionsSection.add(this._table);
 
     this._changelog = new ChangelogView();
@@ -301,6 +307,18 @@ export class VersionsControl extends Control {
         this._btnDelete.trigger();
         return true;
       }
+      if (this._mode === "local" && (key === "U" || key === "u")) {
+        fireAsync(async () => {
+          await this.updateSelected();
+        }, ctx);
+        return true;
+      }
+      if (this._mode === "local" && (key === "A" || key === "a")) {
+        fireAsync(async () => {
+          await this.updateAll();
+        }, ctx);
+        return true;
+      }
       return tableHandleKey(key);
     };
 
@@ -363,7 +381,7 @@ export class VersionsControl extends Control {
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Installed Versions";
-    this._versionsSection.hint = "ins install · del delete";
+    this._versionsSection.hint = "ins install · u update · a all · del delete";
     this._changelogSection.visible = false;
     this._btnBack.visible = false;
     this._forkButton.visible = false;
@@ -495,6 +513,189 @@ export class VersionsControl extends Control {
       handle.close();
       throw err;
     }
+  }
+
+  protected updateLabel(candidate: UpdateCandidate): string {
+    const forkLabel = getFork(candidate.current.fork).label;
+    const backendLabel = BACKEND_LABELS[candidate.current.backend] || candidate.current.backend;
+    return `${forkLabel} ${backendLabel}: ${candidate.current.tag} -> ${candidate.release.tag}`;
+  }
+
+  protected async findLatestUpdateCandidate(
+    current: VersionInfo,
+    releaseCache: Map<string, Promise<RemoteVersion[]>>,
+  ): Promise<UpdateCandidate | null> {
+    let releasesPromise = releaseCache.get(current.fork);
+    if (!releasesPromise) {
+      releasesPromise = listRecentVersions(current.fork, 30);
+      releaseCache.set(current.fork, releasesPromise);
+    }
+
+    const releases = await releasesPromise;
+    const platform = getPlatformKey();
+    for (const release of releases) {
+      const backends = getAvailableBackends(release.tag, platform, release.assets, current.fork);
+      const backend = backends.find((b) => b.id === current.backend);
+      if (backend) {
+        return { current, release, backend };
+      }
+    }
+    return null;
+  }
+
+  protected pickInstalledRuntimePerBackend(versions: VersionInfo[]): VersionInfo[] {
+    const byRuntimeBackend = new Map<string, VersionInfo>();
+    for (const version of versions) {
+      const key = `${version.fork}\0${version.backend}`;
+      const existing = byRuntimeBackend.get(key);
+      if (!existing) {
+        byRuntimeBackend.set(key, version);
+        continue;
+      }
+      // Prefer the active runtime for its fork/backend so Update All can move the active
+      // selection forward. Otherwise, use the newest installed tag as the current baseline.
+      if (version.active || (!existing.active && version.tag.localeCompare(existing.tag) > 0)) {
+        byRuntimeBackend.set(key, version);
+      }
+    }
+    return [...byRuntimeBackend.values()];
+  }
+
+  protected findInstalledTarget(candidate: UpdateCandidate, versions: VersionInfo[]): VersionInfo | null {
+    return versions.find((v) =>
+      v.fork === candidate.current.fork &&
+      v.backend === candidate.current.backend &&
+      v.tag === candidate.release.tag
+    ) || null;
+  }
+
+  protected async executeUpdates(candidates: UpdateCandidate[]): Promise<void> {
+    const ctx = this._ctx;
+    if (!ctx || candidates.length === 0) return;
+    const config = ctx.getConfig();
+    if (!config) return;
+
+    const dialog = createDownloadDialog(
+      candidates.length === 1 ? this.updateLabel(candidates[0]!) : `Update ${candidates.length} runtimes`,
+      "Preparing...",
+    );
+    const handle = dialog.getHandle();
+    ctx.openModal(dialog);
+
+    let installedCount = 0;
+    try {
+      let installedVersions = await listVersions(config);
+      for (let i = 0; i < candidates.length; i++) {
+        const candidate = candidates[i]!;
+        const basePct = Math.floor((i / candidates.length) * 100);
+        const pctSpan = Math.max(1, Math.floor(100 / candidates.length));
+        const label = this.updateLabel(candidate);
+
+        let installedName: string;
+        const existingTarget = this.findInstalledTarget(candidate, installedVersions);
+        if (existingTarget) {
+          installedName = existingTarget.version;
+          handle.update(basePct, `[${i + 1}/${candidates.length}] Already installed: ${label}`);
+        } else {
+          installedName = await installVersion(
+            config,
+            candidate.current.fork,
+            candidate.release.tag,
+            candidate.current.backend,
+            (pct: number, progressLabel: string) => {
+              const overall = Math.min(99, basePct + Math.floor((pct / 100) * pctSpan));
+              handle.update(overall, `[${i + 1}/${candidates.length}] ${label} - ${progressLabel}`);
+            },
+          );
+          installedCount++;
+          installedVersions = await listVersions(config);
+        }
+
+        if (config.activeVersion === candidate.current.version) {
+          await switchVersion(config, installedName);
+          await saveConfig(config);
+          ctx.setConfig(config);
+        }
+      }
+
+      handle.update(100, "Update complete!");
+      setTimeout(() => handle.close(), 500);
+      await handle.promise;
+      ctx.showMessage(`Updated ${candidates.length} runtime/backend combination${candidates.length === 1 ? "" : "s"} (${installedCount} newly installed)`);
+      await this.showLocal();
+    } catch (err: any) {
+      handle.close();
+      throw err;
+    }
+  }
+
+  async updateSelected(): Promise<void> {
+    const ctx = this._ctx;
+    if (!ctx) return;
+    const selected = this._table.getSelectedItem();
+    if (!selected) {
+      ctx.showMessage("Select an installed runtime to update");
+      return;
+    }
+
+    const current = selected.data as VersionInfo;
+    ctx.showMessage(`Checking latest ${getFork(current.fork).label} ${BACKEND_LABELS[current.backend] || current.backend}...`);
+    const candidate = await this.findLatestUpdateCandidate(current, new Map());
+    if (!candidate) {
+      ctx.showMessage(`No compatible newer releases found for ${getFork(current.fork).label} ${BACKEND_LABELS[current.backend] || current.backend}`);
+      return;
+    }
+    if (candidate.release.tag === current.tag) {
+      ctx.showMessage(`${getFork(current.fork).label} ${BACKEND_LABELS[current.backend] || current.backend} is already up to date (${current.tag})`);
+      return;
+    }
+
+    const confirmed = await ctx.openModal<boolean>(createConfirmDialog(
+      "Update Runtime",
+      `Update this runtime/backend?\n\n${this.updateLabel(candidate)}`,
+    ));
+    if (!confirmed) return;
+    await this.executeUpdates([candidate]);
+  }
+
+  async updateAll(): Promise<void> {
+    const ctx = this._ctx;
+    if (!ctx) return;
+    const config = ctx.getConfig();
+    if (!config) return;
+
+    ctx.showMessage("Checking installed runtimes for updates...");
+    const installed = await listVersions(config);
+    if (installed.length === 0) {
+      ctx.showMessage("No installed runtimes to update");
+      return;
+    }
+
+    const currentRuntimes = this.pickInstalledRuntimePerBackend(installed);
+    const releaseCache = new Map<string, Promise<RemoteVersion[]>>();
+    const candidates = (await Promise.all(
+      currentRuntimes.map((version) => this.findLatestUpdateCandidate(version, releaseCache)),
+    )).filter((candidate): candidate is UpdateCandidate =>
+      !!candidate && candidate.release.tag !== candidate.current.tag
+    );
+
+    if (candidates.length === 0) {
+      ctx.showMessage("All installed runtime/backend combinations are already up to date");
+      return;
+    }
+
+    const previewLines = candidates.slice(0, 8).map((candidate) => this.updateLabel(candidate));
+    const moreLine = candidates.length > previewLines.length ? `...and ${candidates.length - previewLines.length} more` : "";
+    const message = [
+      `Update ${candidates.length} runtime/backend combination${candidates.length === 1 ? "" : "s"}?`,
+      "",
+      ...previewLines,
+      ...(moreLine ? [moreLine] : []),
+    ].join("\n");
+
+    const confirmed = await ctx.openModal<boolean>(createConfirmDialog("Update All Runtimes", message));
+    if (!confirmed) return;
+    await this.executeUpdates(candidates);
   }
 
   async refreshLocal(): Promise<void> {
