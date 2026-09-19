@@ -3,7 +3,7 @@ import { EventEmitter } from "events";
 import path from "path";
 import os from "os";
 import fs from "fs-extra";
-import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getActivePresets, getActiveFreeFormArgs } from "./config";
+import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getLogsDir, getActivePresets, getActiveFreeFormArgs } from "./config";
 import { logParser } from "./logparser";
 import { processLine as processMetricLine, reset as resetMetrics } from "./metricstracker";
 import { processModelLine, resetModelInfo } from "../ui/specialized/LoadedModelPanel";
@@ -17,6 +17,7 @@ import { detectForkFromFolder, resolveBinaryName, isForkCompatibleWithPreset, is
 
 let serverProcess: ChildProcess | null = null;
 let serverStartTime: number | null = null;
+let currentLogFile: string | null = null;
 
 // Mutex to serialize start/stop operations
 let serverMutex: Promise<void> = Promise.resolve();
@@ -56,6 +57,24 @@ export function onServerLog(listener: (line: string) => void): () => void {
 export function onServerStatusChange(listener: () => void): () => void {
   statusEmitter.on("change", listener);
   return () => { statusEmitter.off("change", listener); };
+}
+
+/**
+ * Returns the path to the log file currently (or most recently) written by
+ * the server, so the UI can offer to copy it to the clipboard. Falls back to
+ * scanning the logs directory for the newest auto-named file if the server
+ * hasn't been started yet in this process (e.g. after a restart).
+ */
+export function getCurrentLogFile(config?: ConfigData | null): string | null {
+  if (currentLogFile) return currentLogFile;
+  if (config?.server.logFile) return config.server.logFile;
+  const logsDir = getLogsDir();
+  if (!fs.pathExistsSync(logsDir)) return null;
+  const files = fs.readdirSync(logsDir)
+    .filter((f: string) => /^server\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.log$/.test(f))
+    .sort();
+  if (files.length === 0) return null;
+  return path.join(logsDir, files[files.length - 1]);
 }
 
 export function listDevices(config: ConfigData): string {
@@ -116,6 +135,7 @@ export function startServer(config: ConfigData): Promise<number> {
       }
 
       const logFile = getLogFile(config);
+      currentLogFile = logFile;
       await fs.ensureDir(path.dirname(logFile));
       taskStore.setLogFile(logFile);
       const logStream = await fs.createWriteStream(logFile, { flags: "a" });

@@ -4,7 +4,8 @@ import { Section } from "../../framework/widgets/Section";
 import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
 import { createInputDialog } from "../../framework/widgets/InputDialog";
 import { LogsViewer } from "../specialized/LogsViewer";
-import { serverLogLines, onServerLog, clearServerLog } from "../../lib/server";
+import { serverLogLines, onServerLog, clearServerLog, getCurrentLogFile } from "../../lib/server";
+import { copyToClipboard } from "../../lib/clipboard";
 import { fireAsync } from "../../lib/utils";
 import type { TabContext } from "../../lib/tabcontext";
 import type { Size } from "../../framework/types";
@@ -22,7 +23,7 @@ export class LogsControl extends Control {
 
     this._section = new Section();
     this._section.title = "Logs";
-    this._section.hint = "scroll to navigate · c/del clear · w wrap · f/ find";
+    this._section.hint = "scroll to navigate · c/del clear · w wrap · f/ find · p path";
     this._section.flex = 1;
     // Logs are frequently multi-line-selected in the terminal to copy for
     // troubleshooting; the decorative left border bar would get swept into
@@ -84,6 +85,10 @@ export class LogsControl extends Control {
       this.openSearch();
       return true;
     }
+    if (key === "p" || key === "P") {
+      this.copyLogPath();
+      return true;
+    }
     if (key === "n" && this._logsControl.searchQuery) {
       this.reportMatch(this._logsControl.findNext(1));
       return true;
@@ -120,6 +125,30 @@ export class LogsControl extends Control {
       return;
     }
     this._ctx?.showMessage(`Match ${info.current}/${info.total} · n next · N prev · esc clear`);
+  }
+
+  protected copyLogPath(): void {
+    if (!this._ctx) return;
+    const logFile = getCurrentLogFile(this._ctx.getConfig());
+    if (!logFile) {
+      this._ctx.showMessage("No log file yet — start the server first");
+      return;
+    }
+    fireAsync(async () => {
+      const ok = await copyToClipboard(logFile);
+      if (ok) {
+        this._ctx?.showMessage(`Copied to clipboard: ${logFile}`);
+        return;
+      }
+      // Clipboard tool unavailable (e.g. no xclip on headless Linux) - fall
+      // back to a dialog with the path pre-filled so the user can select
+      // and copy it manually from the terminal.
+      await this._ctx!.openModal<string | null>(createInputDialog(
+        "Log File Path",
+        "",
+        logFile,
+      ));
+    }, this._ctx);
   }
 
   protected clearLogs(): void {
