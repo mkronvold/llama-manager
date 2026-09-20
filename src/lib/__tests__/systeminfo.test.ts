@@ -1,5 +1,48 @@
 import { describe, it, expect } from "vitest";
-import { sumByLuid, sampleCpuPercent, parseNvidiaSmiCsv, parseAmdSmiJson, parseVulkanProbeOutput } from "../systeminfo";
+import {
+  sumByLuid,
+  sampleCpuPercent,
+  parseNvidiaSmiCsv,
+  parseAmdSmiJson,
+  parseVulkanProbeOutput,
+  resolveAdapterTotalBytes,
+  type DxgiAdapterBudget,
+} from "../systeminfo";
+
+describe("resolveAdapterTotalBytes", () => {
+  const dxgi: DxgiAdapterBudget = {
+    luidKey: "luid_0x00000000_0xa672528b_phys_0",
+    name: "AMD Radeon(TM) 8060S Graphics",
+    isSoftware: false,
+    localBudgetBytes: 118889820160,
+    nonLocalBudgetBytes: null,
+  };
+
+  it("prefers the perf-counter Limit value when present", () => {
+    expect(resolveAdapterTotalBytes(1000, dxgi, "local")).toBe(1000);
+  });
+
+  it("falls back to the DXGI local budget when the Limit counter is missing", () => {
+    // Reproduces the observed bug: an AMD unified-memory APU registers
+    // Dedicated/Shared Usage counters but never registers a Usage Limit
+    // counter, so the Limit map has no entry for this adapter.
+    expect(resolveAdapterTotalBytes(null, dxgi, "local")).toBe(118889820160);
+    expect(resolveAdapterTotalBytes(undefined, dxgi, "local")).toBe(118889820160);
+  });
+
+  it("does not use the DXGI non-local budget when it is zero/unavailable", () => {
+    expect(resolveAdapterTotalBytes(null, dxgi, "nonLocal")).toBeNull();
+  });
+
+  it("never uses budgets from a software/basic-render adapter", () => {
+    const software: DxgiAdapterBudget = { ...dxgi, isSoftware: true };
+    expect(resolveAdapterTotalBytes(null, software, "local")).toBeNull();
+  });
+
+  it("returns null when no DXGI data is available at all", () => {
+    expect(resolveAdapterTotalBytes(null, undefined, "local")).toBeNull();
+  });
+});
 
 describe("sumByLuid (GPU perf-counter aggregation)", () => {
   it("sums multiple per-engine samples into a single per-adapter total", () => {

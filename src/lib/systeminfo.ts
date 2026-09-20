@@ -211,6 +211,161 @@ export function sumByLuid(lines: string[]): Map<string, number> {
   return totals;
 }
 
+export interface DxgiAdapterBudget {
+  luidKey: string;
+  name: string;
+  isSoftware: boolean;
+  localBudgetBytes: number | null;
+  nonLocalBudgetBytes: number | null;
+}
+
+// On some systems (observed on an AMD Strix Halo/APU with unified memory)
+// the "GPU Adapter Memory" performance counter set only registers the
+// Dedicated/Shared *Usage* counters and never registers the *Usage Limit*
+// counters, so the OS never reports an adapter capacity through Get-Counter.
+// DXGI's IDXGIAdapter3::QueryVideoMemoryInfo exposes an OS-negotiated
+// "Budget" per memory segment group (local/non-local) that is available even
+// when the classic perf counters are missing a limit, so it is used here as
+// a capacity fallback. Note DXGI's CurrentUsage field is scoped to the
+// calling process (per Microsoft's docs) and is NOT a system-wide usage
+// figure, so it is intentionally not used for "used" values - only Budget.
+async function getDxgiAdapterBudgets(): Promise<Map<string, DxgiAdapterBudget>> {
+  const result = new Map<string, DxgiAdapterBudget>();
+  if (os.platform() !== "win32") return result;
+
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct DXGI_ADAPTER_DESC1
+{
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+    public uint VendorId; public uint DeviceId; public uint SubSysId; public uint Revision;
+    public UIntPtr DedicatedVideoMemory; public UIntPtr DedicatedSystemMemory; public UIntPtr SharedSystemMemory;
+    public uint LuidLow; public int LuidHigh; public uint Flags;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct DXGI_QUERY_VIDEO_MEMORY_INFO { public ulong Budget; public ulong CurrentUsage; public ulong AvailableForReservation; public ulong CurrentReservation; }
+
+public static class LmDxgi
+{
+    [DllImport("dxgi.dll")]
+    public static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
+
+    public delegate int EnumAdapters1Delegate(IntPtr self, uint index, out IntPtr adapter);
+    public static int EnumAdapters1(IntPtr factory, uint index, out IntPtr adapter)
+    {
+        IntPtr vtbl = Marshal.ReadIntPtr(factory);
+        IntPtr fn = Marshal.ReadIntPtr(vtbl, 12 * IntPtr.Size);
+        var del = (EnumAdapters1Delegate)Marshal.GetDelegateForFunctionPointer(fn, typeof(EnumAdapters1Delegate));
+        return del(factory, index, out adapter);
+    }
+
+    public delegate void GetDesc1Delegate(IntPtr self, out DXGI_ADAPTER_DESC1 desc);
+    public static void GetDesc1(IntPtr adapter1, out DXGI_ADAPTER_DESC1 desc)
+    {
+        IntPtr vtbl = Marshal.ReadIntPtr(adapter1);
+        IntPtr fn = Marshal.ReadIntPtr(vtbl, 10 * IntPtr.Size);
+        var del = (GetDesc1Delegate)Marshal.GetDelegateForFunctionPointer(fn, typeof(GetDesc1Delegate));
+        del(adapter1, out desc);
+    }
+
+    public delegate int QIDelegate(IntPtr self, ref Guid iid, out IntPtr result);
+    public static int QueryInterface(IntPtr obj, ref Guid iid, out IntPtr result)
+    {
+        IntPtr vtbl = Marshal.ReadIntPtr(obj);
+        IntPtr fn = Marshal.ReadIntPtr(vtbl, 0);
+        var del = (QIDelegate)Marshal.GetDelegateForFunctionPointer(fn, typeof(QIDelegate));
+        return del(obj, ref iid, out result);
+    }
+
+    public delegate int QVMIDelegate(IntPtr self, uint node, uint group, out DXGI_QUERY_VIDEO_MEMORY_INFO info);
+    public static int QueryVideoMemoryInfo(IntPtr adapter3, uint node, uint group, out DXGI_QUERY_VIDEO_MEMORY_INFO info)
+    {
+        IntPtr vtbl = Marshal.ReadIntPtr(adapter3);
+        IntPtr fn = Marshal.ReadIntPtr(vtbl, 14 * IntPtr.Size);
+        var del = (QVMIDelegate)Marshal.GetDelegateForFunctionPointer(fn, typeof(QVMIDelegate));
+        return del(adapter3, node, group, out info);
+    }
+}
+"@
+$iidFactory1 = [Guid]"7b7166ec-21c7-44ae-b21a-c9ae321ae369"
+$iidAdapter3 = [Guid]"645967A4-1392-4310-A798-8053CE3E93FD"
+$factory = [IntPtr]::Zero
+$hr = [LmDxgi]::CreateDXGIFactory1([ref]$iidFactory1, [ref]$factory)
+if ($hr -ne 0) { exit 0 }
+$i = 0
+while ($true) {
+  $adapter1 = [IntPtr]::Zero
+  $hr = [LmDxgi]::EnumAdapters1($factory, [uint32]$i, [ref]$adapter1)
+  if ($hr -ne 0) { break }
+  $desc = New-Object DXGI_ADAPTER_DESC1
+  [LmDxgi]::GetDesc1($adapter1, [ref]$desc)
+  $luid = "luid_0x$($desc.LuidHigh.ToString('x8'))_0x$($desc.LuidLow.ToString('x8'))_phys_0"
+  $adapter3 = [IntPtr]::Zero
+  $hrqi = [LmDxgi]::QueryInterface($adapter1, [ref]$iidAdapter3, [ref]$adapter3)
+  $localBudget = -1
+  $nonLocalBudget = -1
+  if ($hrqi -eq 0) {
+    $local = New-Object DXGI_QUERY_VIDEO_MEMORY_INFO
+    $nonlocal = New-Object DXGI_QUERY_VIDEO_MEMORY_INFO
+    if ([LmDxgi]::QueryVideoMemoryInfo($adapter3, 0, 0, [ref]$local) -eq 0) { $localBudget = $local.Budget }
+    if ([LmDxgi]::QueryVideoMemoryInfo($adapter3, 0, 1, [ref]$nonlocal) -eq 0) { $nonLocalBudget = $nonlocal.Budget }
+  }
+  "$luid,$($desc.Description),$($desc.Flags),$localBudget,$nonLocalBudget"
+  $i++
+}
+`;
+
+  const output = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], 5000);
+  if (!output) return result;
+
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(",");
+    if (parts.length < 5) continue;
+    const luidKey = parts[0]!.toLowerCase();
+    const name = parts[1]!.trim();
+    const flags = Number(parts[2]);
+    const localBudget = Number(parts[3]);
+    const nonLocalBudget = Number(parts[4]);
+    const existing = result.get(luidKey);
+    const localBudgetBytes = Number.isFinite(localBudget) && localBudget >= 0 ? localBudget : null;
+    const nonLocalBudgetBytes = Number.isFinite(nonLocalBudget) && nonLocalBudget >= 0 ? nonLocalBudget : null;
+    // Multiple DXGI adapter objects can share the same LUID (hybrid/compute
+    // nodes for one physical GPU); keep the entry with the largest budget.
+    if (existing && (existing.localBudgetBytes || 0) >= (localBudgetBytes || 0)) continue;
+    result.set(luidKey, {
+      luidKey,
+      name,
+      isSoftware: (flags & 0x2) !== 0,
+      localBudgetBytes,
+      nonLocalBudgetBytes,
+    });
+  }
+
+  return result;
+}
+
+// Resolves an adapter's memory capacity, preferring the perf-counter Limit
+// value when present and otherwise falling back to a DXGI Budget figure
+// (never used for software/basic-render adapters).
+export function resolveAdapterTotalBytes(
+  limitBytes: number | null | undefined,
+  dxgi: DxgiAdapterBudget | undefined,
+  segment: "local" | "nonLocal",
+): number | null {
+  if (limitBytes !== undefined && limitBytes !== null) return limitBytes;
+  if (!dxgi || dxgi.isSoftware) return null;
+  const budget = segment === "local" ? dxgi.localBudgetBytes : dxgi.nonLocalBudgetBytes;
+  return budget && budget > 0 ? budget : null;
+}
+
 async function getWindowsCounterGpuSnapshots(): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {
   if (os.platform() !== "win32") {
     return { gpus: [], error: "Windows performance counters are only available on Windows" };
@@ -238,7 +393,10 @@ Emit '\\GPU Adapter Memory(*)\\Shared Usage'
 Emit '\\GPU Adapter Memory(*)\\Shared Usage Limit'
 `;
 
-  const output = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 5000);
+  const [output, dxgiBudgets] = await Promise.all([
+    runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 5000),
+    getDxgiAdapterBudgets(),
+  ]);
   if (!output) {
     return { gpus: [], error: "Windows counters: could not read GPU performance counters" };
   }
@@ -264,20 +422,34 @@ Emit '\\GPU Adapter Memory(*)\\Shared Usage Limit'
   const sharedUsedByLuid = sumByLuid(sections.SHARED_USED!);
   const sharedLimitByLuid = sumByLuid(sections.SHARED_LIMIT!);
 
-  const adapterKeys = new Set<string>([...dedicatedLimitByLuid.keys(), ...sharedLimitByLuid.keys()]);
+  // Some drivers (observed with unified-memory AMD APUs) only register the
+  // Usage counters and never register the Usage Limit counters, so adapter
+  // detection must not require a Limit counter to be present.
+  const adapterKeys = new Set<string>([
+    ...utilByLuid.keys(),
+    ...dedicatedUsedByLuid.keys(),
+    ...dedicatedLimitByLuid.keys(),
+    ...sharedUsedByLuid.keys(),
+    ...sharedLimitByLuid.keys(),
+  ]);
   if (adapterKeys.size === 0) {
     return { gpus: [], error: "Windows counters: no GPU adapters reported" };
   }
 
-  const gpus: GpuSnapshot[] = Array.from(adapterKeys).map((key, i) => ({
-    label: `GPU ${i + 1}`,
-    source: "Windows counters",
-    utilizationPercent: utilByLuid.has(key) ? Math.min(100, utilByLuid.get(key)!) : null,
-    dedicatedUsedBytes: dedicatedUsedByLuid.get(key) ?? null,
-    dedicatedTotalBytes: dedicatedLimitByLuid.get(key) ?? null,
-    sharedUsedBytes: sharedUsedByLuid.get(key) ?? null,
-    sharedTotalBytes: sharedLimitByLuid.get(key) ?? null,
-  }));
+  const gpus: GpuSnapshot[] = Array.from(adapterKeys).map((key, i) => {
+    const dxgi = dxgiBudgets.get(key);
+    const dedicatedTotalBytes = resolveAdapterTotalBytes(dedicatedLimitByLuid.get(key), dxgi, "local");
+    const sharedTotalBytes = resolveAdapterTotalBytes(sharedLimitByLuid.get(key), dxgi, "nonLocal");
+    return {
+      label: `GPU ${i + 1}`,
+      source: "Windows counters",
+      utilizationPercent: utilByLuid.has(key) ? Math.min(100, utilByLuid.get(key)!) : null,
+      dedicatedUsedBytes: dedicatedUsedByLuid.get(key) ?? null,
+      dedicatedTotalBytes,
+      sharedUsedBytes: sharedUsedByLuid.get(key) ?? null,
+      sharedTotalBytes,
+    };
+  });
 
   gpus.sort((a, b) => (b.dedicatedTotalBytes || 0) - (a.dedicatedTotalBytes || 0));
   gpus.forEach((g, i) => { g.label = `GPU ${i + 1}`; });

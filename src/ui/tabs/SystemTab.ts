@@ -190,6 +190,9 @@ class SystemPanel extends Control {
         drawBar(canvas, x + labelWidth, cy, BAR_WIDTH, ratio, barColorFor(ratio));
         canvas.moveTo(x + labelWidth + BAR_WIDTH + 1, cy);
         fg(canvas, "text", `${formatSize(gpu.dedicatedUsedBytes)} / ${formatSize(gpu.dedicatedTotalBytes)}`);
+      } else if (gpu.dedicatedUsedBytes !== null) {
+        fg(canvas, "text", `${formatSize(gpu.dedicatedUsedBytes)} used`);
+        fg(canvas, "textMuted", " (capacity unknown)");
       } else {
         fg(canvas, "textMuted", "n/a");
       }
@@ -202,6 +205,9 @@ class SystemPanel extends Control {
         drawBar(canvas, x + labelWidth, cy, BAR_WIDTH, ratio, barColorFor(ratio));
         canvas.moveTo(x + labelWidth + BAR_WIDTH + 1, cy);
         fg(canvas, "text", `${formatSize(gpu.sharedUsedBytes)} / ${formatSize(gpu.sharedTotalBytes)}`);
+      } else if (gpu.sharedUsedBytes !== null) {
+        fg(canvas, "text", `${formatSize(gpu.sharedUsedBytes)} used`);
+        fg(canvas, "textMuted", " (capacity unknown)");
       } else {
         fg(canvas, "textMuted", "n/a");
       }
