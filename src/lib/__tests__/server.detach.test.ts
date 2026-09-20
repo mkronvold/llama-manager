@@ -79,4 +79,50 @@ describe("detached session reattach", () => {
     expect(getStatus().running).toBe(false);
     expect(await fs.pathExists(getSessionFile())).toBe(false);
   });
+
+  it("backfills log lines/model info from disk on reattach and keeps tailing new lines", async () => {
+    const { getSessionFile } = await import("../config");
+    const { getModelInfo } = await import("../../ui/specialized/LoadedModelPanel");
+
+    const child: ChildProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    const logFile = path.join(tmpDir, "server.log");
+    await fs.writeFile(
+      logFile,
+      "srv  load_model: loading model '/models/test-model-Q4_K_M.gguf'\n" +
+      "common_param:   - Vulkan0 : Test GPU (23321 MiB, 10692 MiB free)\n" +
+      "srv  llama_server: model loaded\n"
+    );
+
+    await fs.ensureDir(path.dirname(getSessionFile()));
+    await fs.writeJson(getSessionFile(), {
+      pid: child.pid,
+      startedAt: Date.now(),
+      activeVersion: "test-version",
+      logFile,
+    });
+
+    const { detectExistingSession, serverLogLines } = await import("../server");
+
+    detectExistingSession();
+
+    // Backfill from the existing on-disk log content should happen
+    // synchronously (before any file-tail interval fires), so the Dashboard's
+    // Loaded Model panel and Logs tab reflect the already-running server
+    // immediately rather than appearing empty until the next poll.
+    expect(serverLogLines.some((l) => l.includes("test-model"))).toBe(true);
+    expect(getModelInfo()?.name).toContain("test-model");
+
+    // Simulate the still-running detached server appending a new log line;
+    // the poll-based tailer should pick it up without needing a restart.
+    await fs.appendFile(logFile, "some new appended log line\n");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(serverLogLines.some((l) => l.includes("some new appended log line"))).toBe(true);
+
+    process.kill(child.pid!, "SIGTERM");
+  }, 15000);
 });

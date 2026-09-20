@@ -104,7 +104,16 @@ export function detectExistingSession(): SessionFileInfo | null {
   }
   detachedSessionPid = info.pid;
   detachedSessionStartedAt = info.startedAt;
-  if (info.logFile) currentLogFile = info.logFile;
+  if (info.logFile) {
+    currentLogFile = info.logFile;
+    // Backfill the in-memory log buffer, task metrics, and loaded-model info
+    // from the on-disk log (this process never spawned the server, so it
+    // never saw any of its stdout live), then keep tailing for new lines so
+    // the Dashboard/Logs/System tabs stay in sync with the still-running
+    // detached server.
+    tailDetachedLogFile(info.logFile);
+    taskStore.setLogFile(info.logFile);
+  }
   return info;
 }
 
@@ -113,6 +122,106 @@ export const serverLogLines: string[] = [];
 let maxLogLines = MAX_LOG_LINES;
 export function setMaxLogLines(n: number): void {
   maxLogLines = Math.max(1, n);
+}
+
+/**
+ * Appends one already-split log line to the in-memory buffer and runs it
+ * through the same parsers a freshly-spawned server's live stdout/stderr
+ * relay uses (task log parser, metrics tracker, loaded-model info). Shared
+ * by that live relay and by `tailDetachedLogFile()` below (reattached
+ * sessions have no piped stdout to relay from, only the on-disk log file).
+ */
+function ingestLogLine(line: string): void {
+  if (line.length === 0) return;
+  serverLogLines.push(line);
+  if (serverLogLines.length > maxLogLines) {
+    serverLogLines.splice(0, serverLogLines.length - maxLogLines);
+  }
+  logEmitter.emit("log", line);
+  logParser.processLine(line);
+  processMetricLine(line);
+  processModelLine(line);
+}
+
+let detachedTailStop: (() => void) | null = null;
+
+/**
+ * Backfills the in-memory log buffer/metrics/model info from an existing log
+ * file on disk, then keeps polling for appended lines. Used for a session
+ * this process reattached to (via the session marker file) rather than
+ * spawned itself, so the Dashboard/Logs/System tabs reflect its state
+ * instead of appearing as if nothing is running — mirrors
+ * `LogParser.startFileTailer()`'s polling approach for the task-history
+ * parser, but feeds the raw line buffer/metrics/model-info paths instead.
+ */
+function tailDetachedLogFile(filePath: string): void {
+  if (detachedTailStop) {
+    detachedTailStop();
+    detachedTailStop = null;
+  }
+  resetMetrics();
+  resetModelInfo();
+  serverLogLines.length = 0;
+
+  let position = 0;
+
+  // Read whatever is already on disk synchronously so the Dashboard/Logs
+  // tabs reflect the already-running server immediately on this launch,
+  // rather than only after the first async poll interval fires.
+  try {
+    if (fs.pathExistsSync(filePath)) {
+      const content = fs.readFileSync(filePath, "utf-8");
+      const lines = content.split("\n");
+      for (const line of lines) {
+        if (line.trim()) ingestLogLine(line);
+      }
+      position = Buffer.byteLength(content, "utf-8");
+    }
+  } catch {
+    // best-effort; fall through to polling, which will retry
+  }
+
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.size < position) position = 0; // file rotated/truncated
+      if (stat.size === position) return;
+
+      const fd = await fs.open(filePath, "r");
+      try {
+        const buf = Buffer.alloc(stat.size - position);
+        await fs.read(fd, buf, 0, buf.length, position);
+        position += buf.length;
+
+        const text = buf.toString("utf-8");
+        const lines = text.split("\n");
+        for (const line of lines) {
+          if (line.trim()) ingestLogLine(line);
+        }
+      } finally {
+        await fs.close(fd);
+      }
+    } catch {
+      // Log file may not exist yet, be temporarily locked, or the server
+      // may have exited between polls — best-effort, try again next tick.
+    }
+  };
+
+  const interval = setInterval(poll, 1000);
+  detachedTailStop = () => {
+    stopped = true;
+    clearInterval(interval);
+  };
+}
+
+function stopDetachedLogTail(): void {
+  if (detachedTailStop) {
+    detachedTailStop();
+    detachedTailStop = null;
+  }
 }
 
 /** Clears the in-memory log buffer (does not touch the on-disk log file). */
@@ -213,6 +322,7 @@ export function startServer(config: ConfigData): Promise<number> {
       const logFile = getLogFile(config);
       currentLogFile = logFile;
       await fs.ensureDir(path.dirname(logFile));
+      stopDetachedLogTail();
       taskStore.setLogFile(logFile);
       const logStream = await fs.createWriteStream(logFile, { flags: "a" });
 
@@ -251,16 +361,7 @@ export function startServer(config: ConfigData): Promise<number> {
           const parts = buf.split("\n");
           buf = parts.pop() || "";
           for (const part of parts) {
-            if (part.length > 0) {
-              serverLogLines.push(part);
-              if (serverLogLines.length > maxLogLines) {
-                serverLogLines.splice(0, serverLogLines.length - maxLogLines);
-              }
-              logEmitter.emit("log", part);
-              logParser.processLine(part);
-              processMetricLine(part);
-              processModelLine(part);
-            }
+            ingestLogLine(part);
           }
         });
       };
@@ -334,6 +435,9 @@ export function stopServer(): Promise<void> {
       detachedSessionPid = null;
       detachedSessionStartedAt = null;
       clearSessionFile();
+      stopDetachedLogTail();
+      resetMetrics();
+      resetModelInfo();
       resolve();
     };
 
