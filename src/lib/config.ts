@@ -152,6 +152,7 @@ export interface ConfigData {
     nvidiaSmiPath: string | null;
     amdSmiPath: string | null;
     allowAmdSmiWindows: boolean;
+    amdHipSdkInstallerPath: string | null;
   };
 }
 
@@ -569,6 +570,7 @@ const DEFAULT_CONFIG: ConfigData = {
     nvidiaSmiPath: null,
     amdSmiPath: null,
     allowAmdSmiWindows: false,
+    amdHipSdkInstallerPath: null,
   },
 };
 
