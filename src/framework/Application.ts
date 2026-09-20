@@ -79,6 +79,20 @@ export class Application {
     this._root.markAllDirty();
   }
 
+  /**
+   * Clears the physical terminal screen with a raw ANSI erase, then forces a
+   * full repaint of every control. Unlike markAllDirty() alone, this also
+   * fixes stray content that reached the terminal outside of the normal
+   * diff-based render path (e.g. leaked escape/echo bytes), since the
+   * diff-based renderer only rewrites cells it believes changed and would
+   * otherwise leave untouched bleed-through in place.
+   */
+  public hardClear(): void {
+    this._term("\x1b[2J\x1b[H");
+    this._fb.clearAll();
+    this._root.markAllDirty();
+  }
+
   public setTextInputFocused(focused: boolean): void {
     focusManager.activateTextInput(focused);
   }

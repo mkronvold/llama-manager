@@ -86,6 +86,19 @@ export class Framebuffer {
     }
   }
 
+  /**
+   * Blank both buffers (front and back) to defaults without changing which
+   * one is currently "front". Used to force a full repaint after a hard
+   * terminal clear, since a blank "back" buffer means every drawn cell will
+   * differ from it and get rewritten by the diff on the next render.
+   */
+  clearAll(): void {
+    this.clearFront();
+    this.swap();
+    this.clearFront();
+    this.swap();
+  }
+
   /** Fill a rectangle in the front buffer. */
   fillRect(x: number, y: number, w: number, h: number, cell: Cell): void {
     const buf = this.front;

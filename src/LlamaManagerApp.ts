@@ -115,6 +115,14 @@ export class LlamaManagerApp {
   protected handleAppKey(key: string): boolean {
     const textActive = focusManager.isTextInputActive();
 
+    // Universal screen clear/refresh. Intentionally not gated on textActive
+    // or modalManager.isOpen() so it works everywhere without interrupting
+    // whatever is running (server, downloads, tasks, etc.).
+    if (key === "CTRL_L") {
+      if (this._app) this._app.hardClear();
+      return true;
+    }
+
     if (key === "CTRL_T" && !textActive && !modalManager.isOpen()) {
       if (this._config) {
         createThemeSelectorModal(this._config.themeName).then((result) => {
@@ -230,11 +238,12 @@ export class LlamaManagerApp {
   }
 
   /**
-   * Forces a full repaint of the entire screen. Used after recovering from a
-   * swallowed input-handling crash (e.g. a terminal-kit mouse-protocol bug)
-   * where stray output may have reached the terminal mid-frame.
+   * Forces a full repaint of the entire screen, including a raw terminal
+   * clear. Used after recovering from a swallowed input-handling crash (e.g.
+   * a terminal-kit mouse-protocol bug) where stray output may have reached
+   * the terminal mid-frame outside of the normal diff-based render path.
    */
   forceRedraw(): void {
-    if (this._app) this._app.markAllDirty();
+    if (this._app) this._app.hardClear();
   }
 }

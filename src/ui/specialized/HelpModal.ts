@@ -23,6 +23,7 @@ const HELP_SECTIONS = [
       ["Ctrl+T", "Open theme selector"],
       ["Ctrl+D", "Toggle dark/light mode"],
       ["Ctrl+U", "Check for updates"],
+      ["Ctrl+L", "Clear/refresh screen"],
       ["q", "Quit application"],
     ],
   },
