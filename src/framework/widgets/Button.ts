@@ -83,7 +83,13 @@ export class Button extends Control {
       if (this._action) this._action();
       return true;
     }
-    if (FocusManager.handleNavKeys(key)) return true;
+    // Buttons are almost always laid out in a horizontal Row (see
+    // createButtonRow()/createSplitButtonRow() in Layout.ts), so Left/Right
+    // (and h/l) should move focus between them the same way Up/Down (j/k)
+    // already do — otherwise arrow-key navigation silently does nothing in
+    // dialogs like ExitDialog/ConfirmDialog/InputDialog whose only focusable
+    // controls are a row of buttons.
+    if (FocusManager.handleNavKeys(key, true)) return true;
     return false;
   }
 
