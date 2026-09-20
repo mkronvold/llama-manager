@@ -76,6 +76,19 @@ npm install -g llama-manager   # or: npm install -g "<path to your local clone>"
 ```
 Verify with `node --version` (should print `v22.x.x`) before retrying the version install.
 
+## CLI usage
+
+```
+llama-manager          # launch the interactive TUI
+llama-manager --stop    # stop a server left running in the background, without launching the TUI
+```
+
+Choosing **Exit Now** in the Exit dialog (when a server is running) leaves the server running
+detached in the background instead of stopping it — the TUI just closes. Run `llama-manager`
+again to resume managing it (it will show as already running), or run `llama-manager --stop` to
+stop it without reopening the TUI. Choosing **Stop & Exit** instead stops the server gracefully
+before closing.
+
 ## Features
 
 - **Dashboard** — real-time per-slot metrics, server controls (start/stop/restart), loaded model info, and recent-task charts

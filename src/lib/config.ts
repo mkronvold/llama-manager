@@ -610,6 +610,16 @@ export function getLogFile(config: ConfigData): string {
   return path.join(LOGS_DIR, `server.${ts}.log`);
 }
 
+/**
+ * Marker file recording the currently (or most recently) running detached
+ * server process, so a later `llama-manager` launch (or `--stop`) can find
+ * and manage a server that outlived the process that started it (see
+ * "Exit Now" in the Exit dialog). Written on start, removed on a clean stop.
+ */
+export function getSessionFile(): string {
+  return path.join(STATE_DIR, "session.json");
+}
+
 export function getActivePresets(config: ConfigData): ServerPresets {
   return config.server.profiles[config.server.activeProfile]?.presets || DEFAULT_PRESETS;
 }

@@ -5,3 +5,5 @@ dist/
 # source repo (large binaries would break the repo / GitHub's size limits).
 *.gguf
 /unsloth/
+
+.commit-msg.txt

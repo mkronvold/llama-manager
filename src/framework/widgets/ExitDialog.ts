@@ -44,7 +44,7 @@ export class ExitDialog extends Modal {
   }
 
   measure(_parentSize?: Size): Size {
-    return this._clampSize({ width: 52, height: 9 });
+    return this._clampSize({ width: 56, height: 12 });
   }
 
   public closeWithResult(result: ExitResult): void {
@@ -55,8 +55,8 @@ export class ExitDialog extends Modal {
 export function createExitDialog(message: string = "The server is still running. What would you like to do?"): ExitDialog {
   const dialog = new ExitDialog();
   dialog.title = "Exit";
-  dialog.setMinSize(60, 9);
-  dialog.setMaxSize(60, 15);
+  dialog.setMinSize(60, 12);
+  dialog.setMaxSize(60, 16);
   dialog.message = message;
   return dialog;
 }

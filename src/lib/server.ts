@@ -3,7 +3,7 @@ import { EventEmitter } from "events";
 import path from "path";
 import os from "os";
 import fs from "fs-extra";
-import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getLogsDir, getActivePresets, getActiveFreeFormArgs } from "./config";
+import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getLogsDir, getSessionFile, getActivePresets, getActiveFreeFormArgs } from "./config";
 import { logParser } from "./logparser";
 import { processLine as processMetricLine, reset as resetMetrics } from "./metricstracker";
 import { processModelLine, resetModelInfo } from "../ui/specialized/LoadedModelPanel";
@@ -18,6 +18,14 @@ import { detectForkFromFolder, resolveBinaryName, isForkCompatibleWithPreset, is
 let serverProcess: ChildProcess | null = null;
 let serverStartTime: number | null = null;
 let currentLogFile: string | null = null;
+
+// A server left running via "Exit Now" outlives the process that spawned it, so a
+// later launch of llama-manager has no `ChildProcess` handle for it — only what was
+// recorded in the session marker file. `detachedSessionPid`/`detachedSessionStartedAt`
+// track that case; `serverProcess` remains the source of truth whenever this process
+// is the one that actually spawned the server.
+let detachedSessionPid: number | null = null;
+let detachedSessionStartedAt: number | null = null;
 
 // Mutex to serialize start/stop operations
 let serverMutex: Promise<void> = Promise.resolve();
@@ -35,6 +43,70 @@ logEmitter.setMaxListeners(10);
 
 const statusEmitter = new EventEmitter();
 statusEmitter.setMaxListeners(10);
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface SessionFileInfo {
+  pid: number;
+  startedAt: number;
+  activeVersion: string | null;
+  logFile: string | null;
+}
+
+function writeSessionFile(info: SessionFileInfo): void {
+  try {
+    fs.ensureDirSync(path.dirname(getSessionFile()));
+    fs.writeJsonSync(getSessionFile(), info, { spaces: 2 });
+  } catch {
+    // best-effort; a missing session file just means a future launch won't
+    // detect a detached server left running from this one
+  }
+}
+
+function clearSessionFile(): void {
+  try {
+    fs.removeSync(getSessionFile());
+  } catch {
+    // best-effort
+  }
+}
+
+function readSessionFile(): SessionFileInfo | null {
+  try {
+    if (!fs.pathExistsSync(getSessionFile())) return null;
+    const data = fs.readJsonSync(getSessionFile());
+    if (data && typeof data.pid === "number") return data as SessionFileInfo;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Called once at app startup. Detects a server left running detached by a
+ * previous "Exit Now" (or a crash) via the session marker file, so this
+ * process's `getStatus()`/Dashboard can reflect it as running even though
+ * this process never spawned it. Stale marker files (dead PID) are cleared.
+ */
+export function detectExistingSession(): SessionFileInfo | null {
+  const info = readSessionFile();
+  if (!info) return null;
+  if (!isPidAlive(info.pid)) {
+    clearSessionFile();
+    return null;
+  }
+  detachedSessionPid = info.pid;
+  detachedSessionStartedAt = info.startedAt;
+  if (info.logFile) currentLogFile = info.logFile;
+  return info;
+}
 
 const MAX_LOG_LINES = 2000;
 export const serverLogLines: string[] = [];
@@ -118,6 +190,10 @@ export function startServer(config: ConfigData): Promise<number> {
         reject(new Error("Server already running"));
         return;
       }
+      if (detachedSessionPid && isPidAlive(detachedSessionPid)) {
+        reject(new Error("Server already running (detached from a previous session)"));
+        return;
+      }
 
       const versionsDir = getVersionsDir(config);
       const activeVersion = config.activeVersion;
@@ -142,10 +218,27 @@ export function startServer(config: ConfigData): Promise<number> {
 
       const args = buildArgs(config, logFile);
       serverStartTime = Date.now();
+      // detached: true (+ unref below) lets the server outlive this process
+      // — "Exit Now" is meant to leave it running headless, but on Windows an
+      // attached child stays tied to this process's console/Job Object and
+      // gets torn down by the OS when this process exits, even without any
+      // explicit kill. Piping stdout/stderr below is unaffected by this: it's
+      // only used for live in-app log tailing while both processes are
+      // alive — the binary already writes its own `--log-file` independently,
+      // so on-disk logging continues even after this process exits.
       serverProcess = spawn(binary, args, {
         stdio: ["ignore", "pipe", "pipe"],
-        detached: false,
+        detached: true,
         windowsHide: true,
+      });
+      serverProcess.unref();
+      detachedSessionPid = null;
+      detachedSessionStartedAt = null;
+      writeSessionFile({
+        pid: serverProcess.pid!,
+        startedAt: serverStartTime,
+        activeVersion: config.activeVersion ?? null,
+        logFile,
       });
 
       serverProcess.stdout?.pipe(logStream);
@@ -180,6 +273,7 @@ export function startServer(config: ConfigData): Promise<number> {
         const wasRunning = serverProcess !== null;
         serverProcess = null;
         serverStartTime = null;
+        clearSessionFile();
         if (wasRunning) {
           resetMetrics();
           resetModelInfo();
@@ -228,22 +322,41 @@ function terminateProcessTree(pid: number, force: boolean): void {
 
 export function stopServer(): Promise<void> {
   return withLock(() => new Promise((resolve) => {
-    if (!serverProcess?.pid) {
+    const pid = serverProcess?.pid ?? detachedSessionPid;
+    if (!pid) {
       resolve();
       return;
     }
 
-    const pid = serverProcess.pid;
-    serverProcess.on("exit", () => {
+    const finish = () => {
       serverProcess = null;
       serverStartTime = null;
+      detachedSessionPid = null;
+      detachedSessionStartedAt = null;
+      clearSessionFile();
       resolve();
-    });
+    };
+
+    if (serverProcess?.pid === pid) {
+      // We spawned it ourselves in this process — a real ChildProcess "exit"
+      // event tells us definitively (and promptly) when it's gone.
+      serverProcess.on("exit", finish);
+    } else {
+      // Reattached to a detached server from a previous process (or the
+      // `--stop` CLI path) — there's no ChildProcess handle to listen on,
+      // so poll for the PID to disappear instead.
+      const poll = setInterval(() => {
+        if (!isPidAlive(pid)) {
+          clearInterval(poll);
+          finish();
+        }
+      }, 300);
+    }
 
     terminateProcessTree(pid, false);
 
     setTimeout(() => {
-      if (serverProcess?.pid === pid) {
+      if (isPidAlive(pid)) {
         terminateProcessTree(pid, true);
       }
     }, 5000);
@@ -251,24 +364,32 @@ export function stopServer(): Promise<void> {
 }
 
 export function getStatus(): ServerStatus {
-  if (!serverProcess?.pid) {
-    return { running: false, pid: null, uptime: 0 };
+  if (serverProcess?.pid) {
+    const alive = isPidAlive(serverProcess.pid);
+    return {
+      running: alive,
+      pid: serverProcess.pid,
+      uptime: alive && serverStartTime ? Date.now() - serverStartTime : 0,
+    };
   }
 
-  let alive = false;
-  try {
-    process.kill(serverProcess.pid, 0);
-    alive = true;
-  }
-  catch {
-    alive = false;
+  // No ChildProcess handle in this process — check for a server left running
+  // detached by a previous "Exit Now" (detected via detectExistingSession()
+  // at startup).
+  if (detachedSessionPid) {
+    if (isPidAlive(detachedSessionPid)) {
+      return {
+        running: true,
+        pid: detachedSessionPid,
+        uptime: detachedSessionStartedAt ? Date.now() - detachedSessionStartedAt : 0,
+      };
+    }
+    detachedSessionPid = null;
+    detachedSessionStartedAt = null;
+    clearSessionFile();
   }
 
-  return {
-    running: alive,
-    pid: serverProcess.pid,
-    uptime: alive && serverStartTime ? Date.now() - serverStartTime : 0,
-  };
+  return { running: false, pid: null, uptime: 0 };
 }
 
 export function buildArgs(config: ConfigData, logFile: string): string[] {
