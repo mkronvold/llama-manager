@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sumByLuid, sampleCpuPercent, parseNvidiaSmiCsv, parseAmdSmiJson } from "../systeminfo";
+import { sumByLuid, sampleCpuPercent, parseNvidiaSmiCsv, parseAmdSmiJson, parseVulkanProbeOutput } from "../systeminfo";
 
 describe("sumByLuid (GPU perf-counter aggregation)", () => {
   it("sums multiple per-engine samples into a single per-adapter total", () => {
@@ -91,6 +91,27 @@ describe("parseAmdSmiJson", () => {
       utilizationPercent: 42,
       dedicatedUsedBytes: 6144 * 1024 * 1024,
       dedicatedTotalBytes: 24 * 1024 * 1024 * 1024,
+    });
+  });
+
+  describe("parseVulkanProbeOutput", () => {
+    it("parses ggml Vulkan free/total bytes output as memory usage", () => {
+      const total = 24 * 1024 * 1024 * 1024;
+      const free = 18 * 1024 * 1024 * 1024;
+      const gpus = parseVulkanProbeOutput(`0,${free},${total}`);
+
+      expect(gpus).toHaveLength(1);
+      expect(gpus[0]).toMatchObject({
+        label: "Vulkan GPU 1",
+        source: "Vulkan (ggml)",
+        utilizationPercent: null,
+        dedicatedUsedBytes: total - free,
+        dedicatedTotalBytes: total,
+      });
+    });
+
+    it("ignores malformed or zero-capacity Vulkan rows", () => {
+      expect(parseVulkanProbeOutput("bad\n1,100,0\n2,x,10")).toEqual([]);
     });
   });
 

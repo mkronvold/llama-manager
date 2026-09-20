@@ -148,7 +148,7 @@ export interface ConfigData {
     latestVersion: string | null;
   };
   gpuTelemetry: {
-    mode: "auto" | "windows" | "vendor" | "disabled";
+    mode: "auto" | "windows" | "vendor" | "vulkan" | "disabled";
     nvidiaSmiPath: string | null;
     amdSmiPath: string | null;
     allowAmdSmiWindows: boolean;

@@ -2,15 +2,23 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
+import { getVersionsDir } from "./config";
 import type { ConfigData } from "./config";
 
-export type GpuTelemetryMode = "auto" | "windows" | "vendor" | "disabled";
+export type GpuTelemetryMode = "auto" | "windows" | "vendor" | "vulkan" | "disabled";
 
 export interface GpuTelemetrySettings {
   mode: GpuTelemetryMode;
   nvidiaSmiPath: string | null;
   amdSmiPath: string | null;
   allowAmdSmiWindows: boolean;
+}
+
+export interface GpuTelemetrySourceSnapshot {
+  id: string;
+  label: string;
+  gpus: GpuSnapshot[];
+  error: string | null;
 }
 
 export interface GpuSnapshot {
@@ -28,6 +36,7 @@ export interface SystemSnapshot {
   cpuPercent: number | null;
   ramUsedBytes: number;
   ramTotalBytes: number;
+  gpuSources: GpuTelemetrySourceSnapshot[];
   gpus: GpuSnapshot[];
   /** Set when GPU stats couldn't be collected at all (e.g. no source available). */
   gpuError: string | null;
@@ -174,6 +183,11 @@ function parseNumber(raw: string | number | null | undefined): number | null {
 
 function mbToBytes(mb: number | null): number | null {
   return mb === null ? null : Math.round(mb * 1024 * 1024);
+}
+
+function bytesToSnapshotBytes(value: string): number | null {
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**
@@ -429,55 +443,173 @@ async function getAmdSmiGpuSnapshots(settings: GpuTelemetrySettings): Promise<{ 
   return gpus.length > 0 ? { gpus, error: null } : { gpus: [], error: "amd-smi: no usable GPU rows returned" };
 }
 
+function findFileRecursive(root: string, fileName: string, maxDepth = 3): string | null {
+  const target = fileName.toLowerCase();
+  const visit = (dir: string, depth: number): string | null => {
+    if (depth > maxDepth) return null;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isFile() && entry.name.toLowerCase() === target) return fullPath;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const found = visit(path.join(dir, entry.name), depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(root, 0);
+}
+
+export function parseVulkanProbeOutput(output: string): GpuSnapshot[] {
+  const gpus: GpuSnapshot[] = [];
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(",");
+    if (parts.length < 3) continue;
+    const index = Number(parts[0]);
+    const freeBytes = bytesToSnapshotBytes(parts[1]!);
+    const totalBytes = bytesToSnapshotBytes(parts[2]!);
+    if (!Number.isFinite(index) || freeBytes === null || totalBytes === null || totalBytes <= 0) continue;
+    const usedBytes = Math.max(0, totalBytes - freeBytes);
+    gpus.push({
+      label: `Vulkan GPU ${index + 1}`,
+      source: "Vulkan (ggml)",
+      utilizationPercent: null,
+      dedicatedUsedBytes: usedBytes,
+      dedicatedTotalBytes: totalBytes,
+      sharedUsedBytes: null,
+      sharedTotalBytes: null,
+    });
+  }
+  return gpus;
+}
+
+async function getVulkanGpuSnapshots(config?: ConfigData | null): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {
+  if (os.platform() !== "win32") {
+    return { gpus: [], error: "Vulkan: ggml runtime probing is currently implemented for Windows runtimes only" };
+  }
+  if (!config?.activeVersion) {
+    return { gpus: [], error: "Vulkan: no active runtime selected" };
+  }
+
+  const versionPath = path.join(getVersionsDir(config), config.activeVersion);
+  const baseDll = findFileRecursive(versionPath, "ggml-base.dll");
+  const vulkanDll = findFileRecursive(versionPath, "ggml-vulkan.dll");
+  if (!baseDll || !vulkanDll) {
+    return { gpus: [], error: "Vulkan: active runtime does not include ggml-vulkan.dll" };
+  }
+
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Native {
+  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool SetDllDirectory(string lpPathName);
+  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern IntPtr LoadLibrary(string lpFileName);
+  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
+  public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+  [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+  public delegate int CountDelegate();
+  [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+  public delegate void MemoryDelegate(int device, out UIntPtr free, out UIntPtr total);
+}
+"@
+$dir = ${JSON.stringify(path.dirname(vulkanDll))}
+[Native]::SetDllDirectory($dir) | Out-Null
+$base = [Native]::LoadLibrary(${JSON.stringify(baseDll)})
+$vk = [Native]::LoadLibrary(${JSON.stringify(vulkanDll)})
+if ($base -eq [IntPtr]::Zero -or $vk -eq [IntPtr]::Zero) { throw "Could not load ggml Vulkan libraries" }
+$countPtr = [Native]::GetProcAddress($vk, "ggml_backend_vk_get_device_count")
+$memoryPtr = [Native]::GetProcAddress($vk, "ggml_backend_vk_get_device_memory")
+if ($countPtr -eq [IntPtr]::Zero -or $memoryPtr -eq [IntPtr]::Zero) { throw "Required ggml Vulkan exports not found" }
+$countFn = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($countPtr, [Native+CountDelegate])
+$memoryFn = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($memoryPtr, [Native+MemoryDelegate])
+$count = $countFn.Invoke()
+for ($i = 0; $i -lt $count; $i++) {
+  $free = [UIntPtr]::Zero
+  $total = [UIntPtr]::Zero
+  $memoryFn.Invoke($i, [ref]$free, [ref]$total)
+  "$i,$($free.ToUInt64()),$($total.ToUInt64())"
+}
+`;
+
+  const output = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], 5000);
+  if (!output) return { gpus: [], error: "Vulkan: ggml Vulkan memory probe failed" };
+  const gpus = parseVulkanProbeOutput(output);
+  return gpus.length > 0 ? { gpus, error: null } : { gpus: [], error: "Vulkan: no devices reported by ggml Vulkan backend" };
+}
+
+function sourceResult(id: string, label: string, result: { gpus: GpuSnapshot[]; error: string | null }): GpuTelemetrySourceSnapshot {
+  return { id, label, gpus: result.gpus, error: result.error };
+}
+
 /**
  * Collects per-adapter GPU utilization and VRAM using the configured source
  * cascade. In auto mode:
  *  1. Windows performance counters
  *  2. NVIDIA nvidia-smi
  *  3. AMD amd-smi (gated on Windows)
+ *  4. Vulkan ggml runtime memory probe
  */
-export async function getGpuSnapshots(config?: ConfigData | null): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {
+export async function getGpuTelemetrySources(config?: ConfigData | null): Promise<GpuTelemetrySourceSnapshot[]> {
   const settings = telemetrySettings(config);
   if (settings.mode === "disabled") {
-    return { gpus: [], error: "GPU telemetry is disabled in Options" };
+    return [sourceResult("disabled", "Disabled", { gpus: [], error: "GPU telemetry is disabled in Options" })];
   }
 
-  const errors: string[] = [];
-  const trySource = async (fn: () => Promise<{ gpus: GpuSnapshot[]; error: string | null }>) => {
-    const result = await fn();
-    if (result.gpus.length > 0) return result;
-    if (result.error) errors.push(result.error);
-    return null;
-  };
+  const sources: GpuTelemetrySourceSnapshot[] = [];
 
   if (settings.mode === "auto" || settings.mode === "windows") {
-    const result = await trySource(() => getWindowsCounterGpuSnapshots());
-    if (result) return result;
-    if (settings.mode === "windows") return { gpus: [], error: errors.join(" | ") || "No GPU telemetry available" };
+    sources.push(sourceResult("windows", "Windows counters", await getWindowsCounterGpuSnapshots()));
   }
 
   if (settings.mode === "auto" || settings.mode === "vendor") {
-    const nvidia = await trySource(() => getNvidiaSmiGpuSnapshots(settings));
-    if (nvidia) return nvidia;
-    const amd = await trySource(() => getAmdSmiGpuSnapshots(settings));
-    if (amd) return amd;
+    sources.push(sourceResult("nvidia", "nvidia-smi", await getNvidiaSmiGpuSnapshots(settings)));
+    sources.push(sourceResult("amd", "amd-smi", await getAmdSmiGpuSnapshots(settings)));
   }
 
-  return { gpus: [], error: errors.join(" | ") || "No GPU telemetry sources available" };
+  if (settings.mode === "auto" || settings.mode === "vulkan") {
+    sources.push(sourceResult("vulkan", "Vulkan (ggml)", await getVulkanGpuSnapshots(config)));
+  }
+
+  return sources.length > 0 ? sources : [sourceResult("none", "None", { gpus: [], error: "No GPU telemetry sources available" })];
+}
+
+export async function getGpuSnapshots(config?: ConfigData | null): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {
+  const sources = await getGpuTelemetrySources(config);
+  const firstAvailable = sources.find((source) => source.gpus.length > 0);
+  if (firstAvailable) return { gpus: firstAvailable.gpus, error: null };
+  return {
+    gpus: [],
+    error: sources.map((source) => source.error).filter(Boolean).join(" | ") || "No GPU telemetry sources available",
+  };
 }
 
 export async function getSystemSnapshot(config?: ConfigData | null): Promise<SystemSnapshot> {
   const [cpuPercent, gpuResult] = await Promise.all([
     sampleCpuPercent(),
-    getGpuSnapshots(config),
+    getGpuTelemetrySources(config),
   ]);
   const { usedBytes, totalBytes } = getMemoryInfo();
+  const firstAvailable = gpuResult.find((source) => source.gpus.length > 0);
 
   return {
     cpuPercent,
     ramUsedBytes: usedBytes,
     ramTotalBytes: totalBytes,
-    gpus: gpuResult.gpus,
-    gpuError: gpuResult.error,
+    gpuSources: gpuResult,
+    gpus: firstAvailable?.gpus || [],
+    gpuError: firstAvailable ? null : gpuResult.map((source) => source.error).filter(Boolean).join(" | "),
   };
 }

@@ -92,7 +92,7 @@ export const OPTION_CATEGORIES: OptionCategory[] = [
   {
     name: "GPU Telemetry",
     fields: [
-      { key: "mode", type: "enum", default: "auto", options: ["auto", "windows", "vendor", "disabled"], description: "GPU telemetry source mode" },
+      { key: "mode", type: "enum", default: "auto", options: ["auto", "windows", "vendor", "vulkan", "disabled"], description: "GPU telemetry source mode" },
       { key: "nvidiaSmiPath", type: "string", default: null, description: "Optional nvidia-smi path override" },
       { key: "amdSmiPath", type: "string", default: null, description: "Optional amd-smi path override" },
       { key: "allowAmdSmiWindows", type: "boolean", default: false, description: "Allow amd-smi on Windows when HIP SDK isn't detected" },
@@ -112,7 +112,7 @@ export const OPTION_CATEGORIES: OptionCategory[] = [
     setter: (config, values) => {
       if (values.mode !== undefined) {
         const mode = values.mode as string;
-        if (mode === "auto" || mode === "windows" || mode === "vendor" || mode === "disabled") {
+        if (mode === "auto" || mode === "windows" || mode === "vendor" || mode === "vulkan" || mode === "disabled") {
           config.gpuTelemetry.mode = mode;
         }
       }
