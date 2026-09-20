@@ -37,6 +37,7 @@ export class ServerControl extends Control {
 
     this._buttons = [
       new Button({ label: "Create" }),
+      new Button({ label: "Duplicate" }),
       new Button({ label: "Rename" }),
       new Button({ label: "Delete" }),
     ];
@@ -111,10 +112,14 @@ export class ServerControl extends Control {
     });
 
     this._buttons[1]?.setAction(() => {
-      this.renameProfile();
+      this.duplicateProfile();
     });
 
     this._buttons[2]?.setAction(() => {
+      this.renameProfile();
+    });
+
+    this._buttons[3]?.setAction(() => {
       this.deleteProfile();
     });
 
@@ -150,8 +155,8 @@ export class ServerControl extends Control {
     this._settingsPanel.setConfig(config);
     this._profileList.setConfig(config);
     const isDefault = config.server.activeProfile === "Default";
-    this._buttons[1].disabled = isDefault;
     this._buttons[2].disabled = isDefault;
+    this._buttons[3].disabled = isDefault;
     this._summary.builder
       .muted("Profiles ")
       .accentColor(String(count))
@@ -214,6 +219,19 @@ export class ServerControl extends Control {
     fireAsync(async () => {
       const name = await this._ctx!.openModal<string | null>(
         createInputDialog("Create Profile", "Profile name", "")
+      );
+      if (!name) return;
+      this.commitCreateProfile(name, config);
+    }, this._ctx!);
+  }
+
+  duplicateProfile(): void {
+    const config = this._ctx?.getConfig();
+    if (!config) return;
+
+    fireAsync(async () => {
+      const name = await this._ctx!.openModal<string | null>(
+        createInputDialog("Duplicate Profile", "New profile name", `${config.server.activeProfile} copy`)
       );
       if (!name) return;
       this.commitCreateProfile(name, config);

@@ -1,6 +1,7 @@
 import { Scrollable } from "../../framework/widgets/Scrollable";
 import { fg, fgBg } from "../../lib/theme";
 import { renderLogLine, renderLogSegments, wrapLogLine } from "../../lib/logcolors";
+import { compileLogQuery } from "../../lib/logquery";
 import type { LogSegment } from "../../lib/logcolors";
 import type { Point, Size, RenderContext } from "../../framework/types";
 import type { FramebufferCanvas } from "../../lib/framebuffer-canvas";
@@ -29,6 +30,9 @@ export class LogsViewer extends Scrollable {
   protected _searchQuery = "";
   protected _matchLines: number[] = [];
   protected _matchCursor = -1;
+
+  protected _highlightQuery = "";
+  protected _highlightLines: Set<number> = new Set();
 
   constructor(config: LogsViewerConfig) {
     super();
@@ -78,6 +82,23 @@ export class LogsViewer extends Scrollable {
     this.markDirty();
   }
 
+  get highlightQuery(): string { return this._highlightQuery; }
+
+  /** Sets (or, if empty, clears) the persistent highlight query and
+   *  recomputes which lines match it. Independent of search: both can be
+   *  active at once, and each is drawn with its own row background color. */
+  setHighlightQuery(query: string): void {
+    this._highlightQuery = query.trim();
+    this.recomputeHighlights();
+    this.markDirty();
+  }
+
+  clearHighlight(): void {
+    this._highlightQuery = "";
+    this._highlightLines = new Set();
+    this.markDirty();
+  }
+
   /** Moves to the next (direction=1) or previous (direction=-1) match,
    *  wrapping around. Returns null if there is no active search/matches. */
   findNext(direction: 1 | -1): LogSearchMatchInfo | null {
@@ -92,12 +113,34 @@ export class LogsViewer extends Scrollable {
       this._matchLines = [];
       return;
     }
-    const needle = this._searchQuery.toLowerCase();
+    const predicate = compileLogQuery(this._searchQuery);
+    if (!predicate) {
+      this._matchLines = [];
+      return;
+    }
     const lines = this._config.getLines();
     this._matchLines = [];
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i]!.toLowerCase().includes(needle)) this._matchLines.push(i);
+      if (predicate(lines[i]!)) this._matchLines.push(i);
     }
+  }
+
+  protected recomputeHighlights(): void {
+    if (!this._highlightQuery) {
+      this._highlightLines = new Set();
+      return;
+    }
+    const predicate = compileLogQuery(this._highlightQuery);
+    if (!predicate) {
+      this._highlightLines = new Set();
+      return;
+    }
+    const lines = this._config.getLines();
+    const matched = new Set<number>();
+    for (let i = 0; i < lines.length; i++) {
+      if (predicate(lines[i]!)) matched.add(i);
+    }
+    this._highlightLines = matched;
   }
 
   /** Raw log-line index corresponding to the topmost visible row. */
@@ -176,6 +219,7 @@ export class LogsViewer extends Scrollable {
     const cw = this.contentWidth;
     const currentMatchLine = this._matchCursor >= 0 ? this._matchLines[this._matchCursor] : undefined;
     const matchLineSet = this._matchLines.length > 0 ? new Set(this._matchLines) : null;
+    const highlightLineSet = this._highlightLines.size > 0 ? this._highlightLines : null;
 
     if (totalLines === 0 && this._config.emptyMessage) {
       const midY = y + Math.floor(height / 2);
@@ -187,7 +231,7 @@ export class LogsViewer extends Scrollable {
         const rowIdx = this.scrollOffset + i;
         if (rowIdx >= 0 && rowIdx < totalLines) {
           const lineIdx = this._wrapRowLine[rowIdx];
-          this.drawRow(canvas, x, y + i, cw, () => renderLogSegments(canvas, x, y + i, cw, this._wrappedRows[rowIdx]!), lineIdx, currentMatchLine, matchLineSet);
+          this.drawRow(canvas, x, y + i, cw, () => renderLogSegments(canvas, x, y + i, cw, this._wrappedRows[rowIdx]!), lineIdx, currentMatchLine, matchLineSet, highlightLineSet);
         }
       }
     } else {
@@ -195,7 +239,7 @@ export class LogsViewer extends Scrollable {
       for (let i = 0; i < height; i++) {
         const lineIdx = this.scrollOffset + i;
         if (lineIdx >= 0 && lineIdx < totalLines) {
-          this.drawRow(canvas, x, y + i, cw, () => renderLogLine(canvas, x, y + i, cw, lines[lineIdx]!), lineIdx, currentMatchLine, matchLineSet);
+          this.drawRow(canvas, x, y + i, cw, () => renderLogLine(canvas, x, y + i, cw, lines[lineIdx]!), lineIdx, currentMatchLine, matchLineSet, highlightLineSet);
         }
       }
     }
@@ -206,15 +250,21 @@ export class LogsViewer extends Scrollable {
   }
 
   /** Draws one row's background highlight (if it's the current or another
-   *  search match) before delegating to `renderFn` for the actual text. Always
-   *  explicitly sets (or clears) the background so a highlight from an earlier
-   *  row in the same draw pass never bleeds into a later, non-matching row. */
-  protected drawRow(canvas: FramebufferCanvas, x: number, rowY: number, width: number, renderFn: () => void, lineIdx: number | undefined, currentMatchLine: number | undefined, matchLineSet: Set<number> | null): void {
+   *  search match, or a persistent "h" highlight match) before delegating to
+   *  `renderFn` for the actual text. Search-match coloring takes priority
+   *  over highlight coloring when a line is both. Always explicitly sets (or
+   *  clears) the background so a highlight from an earlier row in the same
+   *  draw pass never bleeds into a later, non-matching row. */
+  protected drawRow(canvas: FramebufferCanvas, x: number, rowY: number, width: number, renderFn: () => void, lineIdx: number | undefined, currentMatchLine: number | undefined, matchLineSet: Set<number> | null, highlightLineSet: Set<number> | null): void {
     const isMatch = !!(matchLineSet && lineIdx !== undefined && matchLineSet.has(lineIdx));
+    const isHighlighted = !!(highlightLineSet && lineIdx !== undefined && highlightLineSet.has(lineIdx));
     if (isMatch) {
       canvas.moveTo(x, rowY);
       const isCurrent = lineIdx === currentMatchLine;
       fgBg(canvas, "canvas", isCurrent ? "accent" : "warning", " ".repeat(width));
+    } else if (isHighlighted) {
+      canvas.moveTo(x, rowY);
+      fgBg(canvas, "canvas", "info", " ".repeat(width));
     } else {
       canvas.setBackgroundColor("None");
     }

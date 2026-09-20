@@ -1,18 +1,14 @@
 import { fg, fgBg, setActiveTheme, getThemeNames, setThemeMode, themeHasLightVariant, getThemeMode, rowColors, drawEditableHeader, drawEditableField } from "../../lib/theme";
 import { spawn } from "child_process";
-import fs from "fs";
 import os from "os";
-import path from "path";
 import { focusManager } from "../../framework/FocusManager";
-import { ConfigData, getLogsDir, saveConfig } from "../../lib/config";
+import { ConfigData, getVersionsDir, getModelsDir, getTasksFile, saveConfig } from "../../lib/config";
 import { getInstallableForks } from "../../lib/forks";
+import { getHipSdkStatus, detectNvidiaSmiPath, detectAmdSmiPath } from "../../lib/systeminfo";
 import type { TabContext } from "../../lib/tabcontext";
 import type { RenderContext } from "../../framework/types";
 import { EditableList, EditableRowInfo, formatFieldValue } from "./EditableList";
 import { createThemeSelectorModal } from "./ThemeSelectorModal";
-import { createInputDialog } from "../../framework/widgets/InputDialog";
-import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
-import { fireAsync } from "../../lib/utils";
 
 const KEY_COL_WIDTH = 22;
 
@@ -99,17 +95,13 @@ export const OPTION_CATEGORIES: OptionCategory[] = [
       { key: "nvidiaSmiPath", type: "string", default: null, description: "Optional nvidia-smi path override" },
       { key: "amdSmiPath", type: "string", default: null, description: "Optional amd-smi path override" },
       { key: "allowAmdSmiWindows", type: "boolean", default: false, description: "Allow amd-smi on Windows when HIP SDK isn't detected" },
-      { key: "amdHipSdkInstallerPath", type: "string", default: null, description: "Local AMD HIP SDK Setup.exe path" },
-      { key: "installAmdHipSdkTools", type: "string", default: "Install AMD HIP SDK tools", description: "Run HIP SDK installer silently (admin/UAC)" },
-      { key: "amdSdkTools", type: "string", default: "Open HIP SDK tools page", description: "Open AMD HIP/ROCm SDK tool install/update docs" },
+      { key: "amdSdkTools", type: "string", default: "Open HIP SDK tools page", description: "AMD HIP/ROCm SDK install status; Enter opens install/update docs" },
     ],
     getter: (config) => ({
       mode: config.gpuTelemetry.mode,
       nvidiaSmiPath: config.gpuTelemetry.nvidiaSmiPath,
       amdSmiPath: config.gpuTelemetry.amdSmiPath,
       allowAmdSmiWindows: config.gpuTelemetry.allowAmdSmiWindows,
-      amdHipSdkInstallerPath: config.gpuTelemetry.amdHipSdkInstallerPath,
-      installAmdHipSdkTools: "Install AMD HIP SDK tools",
       amdSdkTools: "Open HIP SDK tools page",
     }),
     setter: (config, values) => {
@@ -122,7 +114,6 @@ export const OPTION_CATEGORIES: OptionCategory[] = [
       if (values.nvidiaSmiPath !== undefined) config.gpuTelemetry.nvidiaSmiPath = values.nvidiaSmiPath as string | null;
       if (values.amdSmiPath !== undefined) config.gpuTelemetry.amdSmiPath = values.amdSmiPath as string | null;
       if (values.allowAmdSmiWindows !== undefined) config.gpuTelemetry.allowAmdSmiWindows = values.allowAmdSmiWindows as boolean;
-      if (values.amdHipSdkInstallerPath !== undefined) config.gpuTelemetry.amdHipSdkInstallerPath = values.amdHipSdkInstallerPath as string | null;
     },
   },
   {
@@ -272,7 +263,7 @@ export class OptionsPanel extends EditableList {
     if (isEditing && this._edit) {
       drawEditableField(canvas, keyStr, this._edit.text, "", true, isHighlighted, this.focused, width);
     } else {
-      let value = formatFieldValue(field, data?.[field.key]);
+      let value = this.formatDisplayValue(field, data?.[field.key], config);
       if (field.key === "hfToken" && value !== "(null)") {
         value = "•".repeat(Math.min(value.length, 16));
       }
@@ -287,16 +278,42 @@ export class OptionsPanel extends EditableList {
         extra = " (HIP/ROCm SDK tool; optional override)";
       } else if (isHighlighted && field.key === "allowAmdSmiWindows") {
         extra = " (avoids prompts unless explicitly enabled)";
-      } else if (isHighlighted && field.key === "amdHipSdkInstallerPath") {
-        extra = " (Setup.exe path)";
-      } else if (isHighlighted && field.key === "installAmdHipSdkTools") {
-        extra = " (enter run installer)";
       } else if (isHighlighted && field.key === "amdSdkTools") {
         extra = " (enter open docs)";
       }
 
       drawEditableField(canvas, keyStr, value, extra, false, isHighlighted, this.focused, width);
     }
+  }
+
+  /** Formats a field's display value, substituting a resolved/auto-detected
+   *  path in place of "(null)" for path-like fields, and a live HIP SDK
+   *  install-status summary for the amdSdkTools row. */
+  protected formatDisplayValue(field: EditableRowInfo["field"], rawValue: unknown, config: ConfigData | null | undefined): string {
+    if (!field) return formatFieldValue({ key: "", type: "string" }, rawValue);
+    if (field.key === "amdSdkTools") {
+      const status = getHipSdkStatus();
+      if (!status.installed) return "Open HIP SDK tools page";
+      return status.detail ? `Installed (${status.detail})` : "Installed";
+    }
+
+    if (rawValue === null || rawValue === undefined) {
+      if (config) {
+        if (field.key === "versionsDir") return `(default) ${getVersionsDir(config)}`;
+        if (field.key === "modelsDir") return `(default) ${getModelsDir(config)}`;
+        if (field.key === "tasksFile") return `(default) ${getTasksFile(config)}`;
+      }
+      if (field.key === "nvidiaSmiPath") {
+        const detected = detectNvidiaSmiPath();
+        return detected ? `(auto) ${detected}` : "(auto-detect \u2014 none found)";
+      }
+      if (field.key === "amdSmiPath") {
+        const detected = detectAmdSmiPath();
+        return detected ? `(auto) ${detected}` : "(auto-detect \u2014 none found)";
+      }
+    }
+
+    return formatFieldValue(field, rawValue);
   }
 
   protected saveAndMessage(): void {
@@ -326,10 +343,6 @@ export class OptionsPanel extends EditableList {
       }
       if (row?.type === "field" && row.field?.key === "amdSdkTools") {
         this.openAmdSdkToolsPage();
-        return true;
-      }
-      if (row?.type === "field" && row.field?.key === "installAmdHipSdkTools") {
-        this.installAmdHipSdkTools();
         return true;
       }
     }
@@ -404,77 +417,5 @@ export class OptionsPanel extends EditableList {
     }
   }
 
-  protected installAmdHipSdkTools(): void {
-    const ctx = this._ctx;
-    if (!ctx) return;
-    fireAsync(async () => {
-      if (os.platform() !== "win32") {
-        ctx.showMessage("AMD HIP SDK tools installer action is only available on Windows");
-        return;
-      }
-
-      const config = ctx.getConfig();
-      if (!config) return;
-
-      const installerPath = await ctx.openModal<string | null>(createInputDialog(
-        "AMD HIP SDK Setup.exe",
-        "Full path to downloaded AMD HIP SDK Setup.exe",
-        config.gpuTelemetry.amdHipSdkInstallerPath || "",
-      ));
-      if (!installerPath) return;
-
-      if (!fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) {
-        ctx.showMessage(`Installer not found: ${installerPath}`);
-        return;
-      }
-
-      config.gpuTelemetry.amdHipSdkInstallerPath = installerPath;
-      saveConfig(config);
-      ctx.setConfig(config);
-
-      const logPath = path.join(getLogsDir(), `hip-sdk-install.${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
-      const confirmed = await ctx.openModal<boolean>(createConfirmDialog(
-        "Install AMD HIP SDK Tools",
-        [
-          "Run the AMD HIP SDK installer silently?",
-          "",
-          `Installer: ${installerPath}`,
-          `Log: ${logPath}`,
-          "",
-          "This will request Administrator/UAC elevation.",
-          "llama-manager will pass: -install -log <log>",
-          "It will not pass -boot and will not install GPU drivers.",
-        ].join("\n"),
-      ));
-      if (!confirmed) return;
-
-      fs.mkdirSync(getLogsDir(), { recursive: true });
-      ctx.showMessage("Launching AMD HIP SDK installer (approve UAC if prompted)...");
-      const exitCode = await this.runElevatedHipInstaller(installerPath, logPath);
-      if (exitCode === 0) {
-        ctx.showMessage(`AMD HIP SDK installer completed. Log: ${logPath}`);
-      } else {
-        ctx.showMessage(`AMD HIP SDK installer exited with code ${exitCode}. Log: ${logPath}`);
-      }
-    }, ctx);
-  }
-
-  protected runElevatedHipInstaller(installerPath: string, logPath: string): Promise<number> {
-    const script = [
-      `$installer = ${JSON.stringify(installerPath)}`,
-      `$log = ${JSON.stringify(logPath)}`,
-      "$p = Start-Process -FilePath $installer -ArgumentList @('-install','-log',$log) -Verb RunAs -Wait -PassThru",
-      "if ($null -ne $p.ExitCode) { exit $p.ExitCode }",
-      "exit 0",
-    ].join("; ");
-
-    return new Promise((resolve) => {
-      const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
-        windowsHide: false,
-        stdio: "ignore",
-      });
-      child.on("error", () => resolve(1));
-      child.on("close", (code) => resolve(code ?? 1));
-    });
-  }
 }
+

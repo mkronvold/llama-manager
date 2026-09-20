@@ -172,6 +172,19 @@ function resolveAmdSmi(overridePath?: string | null): string | null {
   return resolveExecutable(os.platform() === "win32" ? "amd-smi.exe" : "amd-smi", overridePath);
 }
 
+/** Auto-detects the nvidia-smi path (ignoring any override) for display
+ *  purposes on the Options tab, e.g. showing "(auto: <path>)" instead of
+ *  "(null)" when the user hasn't set an explicit override. */
+export function detectNvidiaSmiPath(): string | null {
+  return resolveNvidiaSmi(null);
+}
+
+/** Auto-detects the amd-smi path (ignoring any override) for display
+ *  purposes on the Options tab. */
+export function detectAmdSmiPath(): string | null {
+  return resolveAmdSmi(null);
+}
+
 function parseNumber(raw: string | number | null | undefined): number | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
@@ -529,6 +542,28 @@ function hipSdkDetected(): boolean {
     }
   }
   return false;
+}
+
+export interface HipSdkStatus {
+  installed: boolean;
+  /** Best-effort detail (e.g. detected version/path) when installed; cheap
+   *  env-var/filesystem checks only, no CLI invocation. */
+  detail: string | null;
+}
+
+/** Reports whether the AMD HIP/ROCm SDK tooling appears to be installed
+ *  (used by the Options tab's amdSdkTools row to decide between "Open HIP
+ *  SDK tools page" and showing an installed-status summary). */
+export function getHipSdkStatus(): HipSdkStatus {
+  if (!hipSdkDetected()) return { installed: false, detail: null };
+
+  for (const envVar of ["HIP_PATH", "HIP_PATH_57", "ROCM_PATH"]) {
+    const root = process.env[envVar];
+    if (!root) continue;
+    const versionMatch = root.match(/[\\/](\d+\.\d+(?:\.\d+)?)[\\/]?$/);
+    return { installed: true, detail: versionMatch ? `v${versionMatch[1]} (${root})` : root };
+  }
+  return { installed: true, detail: null };
 }
 
 function parseAmdMemoryMb(value: unknown): number | null {

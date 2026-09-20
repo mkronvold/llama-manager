@@ -23,7 +23,7 @@ export class LogsControl extends Control {
 
     this._section = new Section();
     this._section.title = "Logs";
-    this._section.hint = "scroll to navigate · c/del clear · w wrap · f/ find · p path";
+    this._section.hint = "scroll to navigate · c/del clear · w wrap · f/ find · h highlight · p path";
     this._section.flex = 1;
     // Logs are frequently multi-line-selected in the terminal to copy for
     // troubleshooting; the decorative left border bar would get swept into
@@ -85,6 +85,10 @@ export class LogsControl extends Control {
       this.openSearch();
       return true;
     }
+    if (key === "h" || key === "H") {
+      this.openHighlight();
+      return true;
+    }
     if (key === "p" || key === "P") {
       this.copyLogPath();
       return true;
@@ -116,6 +120,24 @@ export class LogsControl extends Control {
       ));
       if (result === null) return;
       this.reportMatch(this._logsControl.setSearchQuery(result));
+    }, this._ctx);
+  }
+
+  protected openHighlight(): void {
+    if (!this._ctx) return;
+    fireAsync(async () => {
+      const result = await this._ctx!.openModal<string | null>(createInputDialog(
+        "Highlight in Logs",
+        "highlight text... (empty clears)",
+        this._logsControl.highlightQuery,
+      ));
+      if (result === null) return;
+      this._logsControl.setHighlightQuery(result);
+      if (!result.trim()) {
+        this._ctx?.showMessage("Highlight cleared");
+      } else {
+        this._ctx?.showMessage(`Highlighting lines matching "${result.trim()}"`);
+      }
     }, this._ctx);
   }
 

@@ -93,6 +93,8 @@ export class VersionsControl extends Control {
   protected _dividerButtons: Spacer;
   protected _buttonRow: Row;
   protected _btnInstall: Button;
+  protected _btnUpdate: Button;
+  protected _btnUpdateAll: Button;
   protected _btnDelete: Button;
   protected _btnBack: Button;
   protected _contentRow: Row;
@@ -121,8 +123,7 @@ export class VersionsControl extends Control {
     this._table.columns = [
       {
         label: "Tag",
-        width: 8,
-        flex: 1,
+        width: 10,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
@@ -136,7 +137,8 @@ export class VersionsControl extends Control {
       },
       {
         label: "Backend",
-        width: 12,
+        width: 14,
+        flex: 1,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
@@ -150,7 +152,7 @@ export class VersionsControl extends Control {
       },
       {
         label: "Fork",
-        width: 12,
+        width: 14,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
@@ -188,6 +190,8 @@ export class VersionsControl extends Control {
     this._changelog.flex = 1;
 
     this._btnInstall = new Button({ label: "Install" });
+    this._btnUpdate = new Button({ label: "Update" });
+    this._btnUpdateAll = new Button({ label: "Update All" });
     this._btnDelete = new Button({ label: "Delete" });
     this._btnBack = new Button({ label: "Back" });
     this._btnBack.visible = false;
@@ -203,6 +207,8 @@ export class VersionsControl extends Control {
     this._dividerButtons.flex = 1;
     this._buttonRow.add(this._dividerButtons);
     this._buttonRow.add(this._btnInstall);
+    this._buttonRow.add(this._btnUpdate);
+    this._buttonRow.add(this._btnUpdateAll);
     this._buttonRow.add(this._btnDelete);
 
     this._contentRow = new Row();
@@ -235,6 +241,18 @@ export class VersionsControl extends Control {
     this._btnInstall.setAction(() => {
       fireAsync(async () => {
         await this.showReleases();
+      }, ctx);
+    });
+
+    this._btnUpdate.setAction(() => {
+      fireAsync(async () => {
+        await this.updateSelected();
+      }, ctx);
+    });
+
+    this._btnUpdateAll.setAction(() => {
+      fireAsync(async () => {
+        await this.updateAll();
       }, ctx);
     });
 
@@ -387,6 +405,8 @@ export class VersionsControl extends Control {
     this._forkButton.visible = false;
     this._btnInstall.visible = true;
     this._btnInstall.label = "Install";
+    this._btnUpdate.visible = true;
+    this._btnUpdateAll.visible = true;
     this._btnDelete.visible = true;
     await this.refreshLocal();
   }
@@ -402,6 +422,8 @@ export class VersionsControl extends Control {
     this._versionsSection.hint = "";
     this._btnBack.visible = true;
     this._btnInstall.visible = false;
+    this._btnUpdate.visible = false;
+    this._btnUpdateAll.visible = false;
     this._btnDelete.visible = false;
     this._changelogSection.visible = true;
     this._forkButton.visible = true;
@@ -450,6 +472,8 @@ export class VersionsControl extends Control {
     this._changelogSection.visible = false;
     this._btnBack.visible = true;
     this._btnInstall.visible = false;
+    this._btnUpdate.visible = false;
+    this._btnUpdateAll.visible = false;
     this._btnDelete.visible = false;
     this._table.selectedIndex = -1;
     this._table.updateItems([]);
@@ -732,10 +756,12 @@ export class VersionsControl extends Control {
 
       this._table.setOnHighlight((item) => {
         this._btnDelete.disabled = !item || (item.data as VersionInfo).active;
+        this._btnUpdate.disabled = !item;
       });
 
       const sel = this._table.getSelectedItem();
       this._btnDelete.disabled = !sel || (sel.data as VersionInfo).active;
+      this._btnUpdate.disabled = !sel;
       this.markDirty();
     } catch (err: any) {
       // ignore
