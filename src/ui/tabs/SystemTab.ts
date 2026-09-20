@@ -45,12 +45,17 @@ class SystemPanel extends Control {
   }
 
   protected contentHeight(): number {
-    // CPU (1) + RAM (1) + gap (1) + per-GPU (util + dedicated + shared, +1 gap between) or 1-line error/loading
+    // CPU (1) + RAM (1) + gap (1) + per-GPU (util + dedicated + shared, +1 gap between) or error/loading lines
     if (!this._snapshot) return 3;
     const gpuLines = this._snapshot.gpus.length > 0
       ? this._snapshot.gpus.length * 3 + (this._snapshot.gpus.length - 1)
-      : 1;
+      : this.gpuErrorLines(this._snapshot.gpuError).length;
     return 1 + 1 + 1 + gpuLines;
+  }
+
+  protected gpuErrorLines(error: string | null): string[] {
+    const message = error || "No GPUs detected";
+    return message.split("|").map((part) => part.trim()).filter(Boolean);
   }
 
   start(): void {
@@ -116,8 +121,11 @@ class SystemPanel extends Control {
     cy++;
 
     if (snap.gpus.length === 0) {
-      canvas.moveTo(x, cy);
-      fg(canvas, "textMuted", snap.gpuError || "No GPUs detected");
+      for (const line of this.gpuErrorLines(snap.gpuError)) {
+        canvas.moveTo(x, cy);
+        fg(canvas, "textMuted", line.padEnd(this.rect.width).slice(0, this.rect.width));
+        cy++;
+      }
       return;
     }
 
