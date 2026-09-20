@@ -82,7 +82,7 @@ export class DashboardControl extends Control {
     this._metricsPanel = new MetricsPanel();
 
     this._modelSection = new Section();
-    this._modelSection.title = "Loaded Model";
+    this._modelSection.title = "Loaded Model (at startup)";
         this._modelSection.hint = "m";
     this._modelSection.add(this._modelPanel);
 

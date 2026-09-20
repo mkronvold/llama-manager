@@ -406,7 +406,7 @@ export class LoadedModelPanel extends Control {
       if (model.mmprojName) height += 1;
       const usedDevices = model.deviceMemory.filter(d => d.modelMiB + d.contextMiB + d.computeMiB > 0);
       if (usedDevices.length > 0) {
-        height += 1 + usedDevices.length;
+        height += 2 + usedDevices.length;
       }
     }
     return {
@@ -520,6 +520,12 @@ export class LoadedModelPanel extends Control {
     cy++;
 
     if (usedDevices.length > 0) {
+      if (cy >= y + this.rect.height) return;
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "  ");
+      fg(canvas, "textMuted", "Memory at load (parsed from server log, not live)");
+      cy++;
+
       if (cy >= y + this.rect.height) return;
       canvas.moveTo(x, cy);
       fg(canvas, "textMuted", "  ");
