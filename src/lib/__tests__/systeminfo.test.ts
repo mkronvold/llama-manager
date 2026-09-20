@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sumByLuid, sampleCpuPercent } from "../systeminfo";
+import { sumByLuid, sampleCpuPercent, parseNvidiaSmiCsv, parseAmdSmiJson } from "../systeminfo";
 
 describe("sumByLuid (GPU perf-counter aggregation)", () => {
   it("sums multiple per-engine samples into a single per-adapter total", () => {
@@ -38,5 +38,75 @@ describe("sampleCpuPercent", () => {
   it("resolves a percentage between 0 and 100", async () => {
     const percent = await sampleCpuPercent(50);
     expect(percent === null || (percent >= 0 && percent <= 100)).toBe(true);
+  });
+});
+
+describe("parseNvidiaSmiCsv", () => {
+  it("parses utilization and VRAM from nvidia-smi CSV output", () => {
+    const gpus = parseNvidiaSmiCsv([
+      "0, NVIDIA GeForce RTX 4090, 73, 10240, 24564",
+      "1, NVIDIA RTX 6000 Ada Generation, [N/A], [N/A], 49140",
+    ].join("\n"));
+
+    expect(gpus).toHaveLength(2);
+    expect(gpus[0]).toMatchObject({
+      label: "NVIDIA GeForce RTX 4090",
+      source: "nvidia-smi",
+      utilizationPercent: 73,
+      dedicatedUsedBytes: 10240 * 1024 * 1024,
+      dedicatedTotalBytes: 24564 * 1024 * 1024,
+    });
+    expect(gpus[1]!.utilizationPercent).toBeNull();
+    expect(gpus[1]!.dedicatedUsedBytes).toBeNull();
+    expect(gpus[1]!.dedicatedTotalBytes).toBe(49140 * 1024 * 1024);
+  });
+
+  it("keeps GPU names containing commas by parsing numeric fields from the tail", () => {
+    const gpus = parseNvidiaSmiCsv("0, NVIDIA, GPU With Comma, 10, 512, 8192");
+    expect(gpus[0]!.label).toBe("NVIDIA, GPU With Comma");
+    expect(gpus[0]!.utilizationPercent).toBe(10);
+  });
+});
+
+describe("parseAmdSmiJson", () => {
+  it("parses modern amd-smi mem_usage and usage shapes", () => {
+    const gpus = parseAmdSmiJson(JSON.stringify({
+      gpu_data: [
+        {
+          gpu: 0,
+          market_name: "AMD Radeon RX 7900 XTX",
+          usage: { gfx_activity: 42 },
+          mem_usage: {
+            used_vram: { value: 6144, unit: "MiB" },
+            total_vram: { value: 24, unit: "GiB" },
+          },
+        },
+      ],
+    }));
+
+    expect(gpus).toHaveLength(1);
+    expect(gpus[0]).toMatchObject({
+      label: "AMD Radeon RX 7900 XTX",
+      source: "amd-smi",
+      utilizationPercent: 42,
+      dedicatedUsedBytes: 6144 * 1024 * 1024,
+      dedicatedTotalBytes: 24 * 1024 * 1024 * 1024,
+    });
+  });
+
+  it("parses older vram/fb_memory_usage style output and ignores invalid JSON", () => {
+    const gpus = parseAmdSmiJson(JSON.stringify([
+      {
+        name: "AMD GPU",
+        gpu_activity: { gpu_use_percent: "11" },
+        fb_memory_usage: { used: "1024 MiB", total: "8192 MiB" },
+      },
+    ]));
+
+    expect(gpus).toHaveLength(1);
+    expect(gpus[0]!.utilizationPercent).toBe(11);
+    expect(gpus[0]!.dedicatedUsedBytes).toBe(1024 * 1024 * 1024);
+    expect(gpus[0]!.dedicatedTotalBytes).toBe(8192 * 1024 * 1024);
+    expect(parseAmdSmiJson("not-json")).toEqual([]);
   });
 });

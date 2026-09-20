@@ -1,4 +1,6 @@
 import { fg, fgBg, setActiveTheme, getThemeNames, setThemeMode, themeHasLightVariant, getThemeMode, rowColors, drawEditableHeader, drawEditableField } from "../../lib/theme";
+import { spawn } from "child_process";
+import os from "os";
 import { focusManager } from "../../framework/FocusManager";
 import { ConfigData, saveConfig } from "../../lib/config";
 import { getInstallableForks } from "../../lib/forks";
@@ -80,6 +82,34 @@ export const OPTION_CATEGORIES: OptionCategory[] = [
     }),
     setter: (config, values) => {
       if (values.maxLogLines !== undefined) config.logs.maxLogLines = values.maxLogLines as number;
+    },
+  },
+  {
+    name: "GPU Telemetry",
+    fields: [
+      { key: "mode", type: "enum", default: "auto", options: ["auto", "windows", "vendor", "disabled"], description: "GPU telemetry source mode" },
+      { key: "nvidiaSmiPath", type: "string", default: null, description: "Optional nvidia-smi path override" },
+      { key: "amdSmiPath", type: "string", default: null, description: "Optional amd-smi path override" },
+      { key: "allowAmdSmiWindows", type: "boolean", default: false, description: "Allow amd-smi on Windows when HIP SDK isn't detected" },
+      { key: "amdSdkTools", type: "string", default: "Open HIP SDK tools page", description: "Open AMD HIP/ROCm SDK tool install/update docs" },
+    ],
+    getter: (config) => ({
+      mode: config.gpuTelemetry.mode,
+      nvidiaSmiPath: config.gpuTelemetry.nvidiaSmiPath,
+      amdSmiPath: config.gpuTelemetry.amdSmiPath,
+      allowAmdSmiWindows: config.gpuTelemetry.allowAmdSmiWindows,
+      amdSdkTools: "Open HIP SDK tools page",
+    }),
+    setter: (config, values) => {
+      if (values.mode !== undefined) {
+        const mode = values.mode as string;
+        if (mode === "auto" || mode === "windows" || mode === "vendor" || mode === "disabled") {
+          config.gpuTelemetry.mode = mode;
+        }
+      }
+      if (values.nvidiaSmiPath !== undefined) config.gpuTelemetry.nvidiaSmiPath = values.nvidiaSmiPath as string | null;
+      if (values.amdSmiPath !== undefined) config.gpuTelemetry.amdSmiPath = values.amdSmiPath as string | null;
+      if (values.allowAmdSmiWindows !== undefined) config.gpuTelemetry.allowAmdSmiWindows = values.allowAmdSmiWindows as boolean;
     },
   },
   {
@@ -238,6 +268,15 @@ export class OptionsPanel extends EditableList {
       if (isHighlighted && (field.type === "boolean" || field.type === "enum")) {
         extra = " (toggle)";
       }
+      if (isHighlighted && field.key === "nvidiaSmiPath") {
+        extra = " (driver-managed; optional override)";
+      } else if (isHighlighted && field.key === "amdSmiPath") {
+        extra = " (HIP/ROCm SDK tool; optional override)";
+      } else if (isHighlighted && field.key === "allowAmdSmiWindows") {
+        extra = " (avoids prompts unless explicitly enabled)";
+      } else if (isHighlighted && field.key === "amdSdkTools") {
+        extra = " (enter open docs)";
+      }
 
       drawEditableField(canvas, keyStr, value, extra, false, isHighlighted, this.focused, width);
     }
@@ -266,6 +305,10 @@ export class OptionsPanel extends EditableList {
       }
       if (row?.type === "field" && row.field?.key === "defaultFork") {
         this.cycleDefaultFork(row);
+        return true;
+      }
+      if (row?.type === "field" && row.field?.key === "amdSdkTools") {
+        this.openAmdSdkToolsPage();
         return true;
       }
     }
@@ -314,5 +357,29 @@ export class OptionsPanel extends EditableList {
     this.saveAndMessage();
     this._ctx?.forceRender();
     this.markDirty();
+  }
+
+  protected openAmdSdkToolsPage(): void {
+    const url = "https://rocm.docs.amd.com/projects/install-on-windows/en/latest/";
+    const platform = os.platform();
+    let cmd: string;
+    let args: string[];
+    if (platform === "win32") {
+      cmd = "cmd";
+      args = ["/c", "start", "", url];
+    } else if (platform === "darwin") {
+      cmd = "open";
+      args = [url];
+    } else {
+      cmd = "xdg-open";
+      args = [url];
+    }
+
+    try {
+      spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      this._ctx?.showMessage("Opened AMD HIP/ROCm SDK tools documentation");
+    } catch {
+      this._ctx?.showMessage(url);
+    }
   }
 }

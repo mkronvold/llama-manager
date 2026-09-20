@@ -29,10 +29,16 @@ function drawBar(canvas: RenderContext["canvas"], x: number, y: number, width: n
 
 class SystemPanel extends Control {
   focusable = false;
+  protected _ctx: TabContext | null = null;
   protected _snapshot: SystemSnapshot | null = null;
   protected _loading = true;
   protected _refreshTimer: ReturnType<typeof setTimeout> | null = null;
   protected _destroyed = false;
+
+  constructor(ctx: TabContext) {
+    super();
+    this._ctx = ctx;
+  }
 
   measure(parentSize?: Size): Size {
     return { width: parentSize?.width ?? this.rect.width, height: this.contentHeight() };
@@ -61,7 +67,7 @@ class SystemPanel extends Control {
   }
 
   protected refresh(): void {
-    getSystemSnapshot().then((snapshot) => {
+    getSystemSnapshot(this._ctx?.getConfig()).then((snapshot) => {
       if (this._destroyed) return;
       this._snapshot = snapshot;
       this._loading = false;
@@ -119,13 +125,16 @@ class SystemPanel extends Control {
       const gpu = snap.gpus[i]!;
 
       canvas.moveTo(x, cy);
-      fg(canvas, "textMuted", `${gpu.label} Util`.padEnd(labelWidth));
+      const gpuLabel = `${gpu.label} Util`;
+      fg(canvas, "textMuted", gpuLabel.padEnd(labelWidth).slice(0, labelWidth));
       if (gpu.utilizationPercent !== null) {
         drawBar(canvas, x + labelWidth, cy, BAR_WIDTH, gpu.utilizationPercent / 100, barColorFor(gpu.utilizationPercent / 100));
         canvas.moveTo(x + labelWidth + BAR_WIDTH + 1, cy);
         fg(canvas, "text", `${gpu.utilizationPercent.toFixed(0)}%`);
+        fg(canvas, "textMuted", ` · ${gpu.source}`);
       } else {
         fg(canvas, "textMuted", "n/a");
+        fg(canvas, "textMuted", ` · ${gpu.source}`);
       }
       cy++;
 
@@ -168,7 +177,7 @@ export class SystemControl extends Control {
     super();
     this._ctx = ctx;
 
-    this._panel = new SystemPanel();
+    this._panel = new SystemPanel(ctx);
 
     this._section = new Section();
     this._section.title = "System";

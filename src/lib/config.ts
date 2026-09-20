@@ -147,6 +147,12 @@ export interface ConfigData {
     lastCheckedAt: number | null;
     latestVersion: string | null;
   };
+  gpuTelemetry: {
+    mode: "auto" | "windows" | "vendor" | "disabled";
+    nvidiaSmiPath: string | null;
+    amdSmiPath: string | null;
+    allowAmdSmiWindows: boolean;
+  };
 }
 
 /** Valid --spec-type values per llama.cpp's tools/server/README.md; passed as a
@@ -558,6 +564,12 @@ const DEFAULT_CONFIG: ConfigData = {
     lastCheckedAt: null,
     latestVersion: null,
   },
+  gpuTelemetry: {
+    mode: "auto",
+    nvidiaSmiPath: null,
+    amdSmiPath: null,
+    allowAmdSmiWindows: false,
+  },
 };
 
 export function getConfigPath(): string {
@@ -684,6 +696,10 @@ export async function loadConfig(): Promise<ConfigData> {
       updates: {
         ...DEFAULT_CONFIG.updates,
         ...(migrated.updates || {}),
+      },
+      gpuTelemetry: {
+        ...DEFAULT_CONFIG.gpuTelemetry,
+        ...(migrated.gpuTelemetry || {}),
       },
     };
     return merged;
