@@ -125,6 +125,7 @@ export interface ConfigData {
   defaultFork: string;
   server: {
     logFile: string | null;
+    startDetached: boolean;
     profiles: Record<string, ServerProfile>;
     activeProfile: string;
   };
@@ -538,6 +539,11 @@ const DEFAULT_CONFIG: ConfigData = {
   defaultFork: "llama.cpp",
   server: {
     logFile: null,
+    // Detached (survives "Exit Now"/llama-manager exiting or crashing) is
+    // the default and recommended setting on Windows — see the "Exit Now"
+    // vs "Stop & Exit" behavior. Exposed as an option since some users may
+    // prefer the server to always die with llama-manager instead.
+    startDetached: true,
     profiles: {
       Default: {
         presets: DEFAULT_PRESETS,

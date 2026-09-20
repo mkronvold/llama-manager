@@ -66,14 +66,17 @@ export const OPTION_CATEGORIES: OptionCategory[] = [
     name: "Dashboard",
     fields: [
       { key: "pollIntervalMs", type: "number", default: 2000, description: "Dashboard poll interval (ms)" },
+      { key: "startDetached", type: "boolean", default: true, description: "Start server detached (survives Exit Now/crash)" },
       { key: "killServerOnExit", type: "boolean", default: false, description: "Kill server on app exit" },
     ],
     getter: (config) => ({
       pollIntervalMs: config.dashboard.pollIntervalMs,
+      startDetached: config.server.startDetached,
       killServerOnExit: config.dashboard.killServerOnExit,
     }),
     setter: (config, values) => {
       if (values.pollIntervalMs !== undefined) config.dashboard.pollIntervalMs = values.pollIntervalMs as number;
+      if (values.startDetached !== undefined) config.server.startDetached = values.startDetached as boolean;
       if (values.killServerOnExit !== undefined) config.dashboard.killServerOnExit = values.killServerOnExit as boolean;
     },
   },

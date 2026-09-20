@@ -199,11 +199,20 @@ export class LlamaManagerApp {
       return;
     }
     const pidNote = status.pid ? ` (PID ${status.pid})` : "";
-    const message =
-      `The server is still running${pidNote}.\n\n` +
-      `Exit Now leaves it running in the background.\n` +
-      `Resume with llama-manager, or stop it with\n` +
-      `llama-manager --stop.`;
+    // Options > Dashboard > "Start server detached" controls whether Exit
+    // Now actually leaves the server alive (see startServer() in server.ts)
+    // — when it's off, an attached child dies with this process on Windows
+    // regardless of which exit option is chosen, so the message shouldn't
+    // promise a resumable background session that won't exist.
+    const startDetached = this._config?.server.startDetached !== false;
+    const message = startDetached
+      ? `The server is still running${pidNote}.\n\n` +
+        `Exit Now leaves it running in the background.\n` +
+        `Resume with llama-manager, or stop it with\n` +
+        `llama-manager --stop.`
+      : `The server is still running${pidNote}.\n\n` +
+        `"Start server detached" is off in Options, so Exit Now\n` +
+        `will also stop it (it cannot outlive llama-manager).`;
     const result = await this._ctx!.openModal<string>(createExitDialog(message));
     if (result === "cancel") return;
     if (result === "exit") {

@@ -438,13 +438,17 @@ export function startServer(config: ConfigData): Promise<number> {
       // used for live in-app log tailing while both processes are alive —
       // the binary already writes its own `--log-file` independently, so
       // on-disk logging continues even after this process exits.
+      // Configurable via Options > Server > Start Server Detached (defaults
+      // to true); users who'd rather the server always die with
+      // llama-manager can turn it off.
+      const startDetached = config.server.startDetached !== false;
       serverProcess = spawn(binary, args, {
         stdio: ["ignore", "pipe", errFd],
-        detached: true,
+        detached: startDetached,
         windowsHide: true,
       });
       fs.closeSync(errFd); // child already has its own inherited handle
-      serverProcess.unref();
+      if (startDetached) serverProcess.unref();
       detachedSessionPid = null;
       detachedSessionStartedAt = null;
       writeSessionFile({
