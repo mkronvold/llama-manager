@@ -393,68 +393,83 @@ Emit '\\GPU Adapter Memory(*)\\Shared Usage'
 Emit '\\GPU Adapter Memory(*)\\Shared Usage Limit'
 `;
 
-  const [output, dxgiBudgets] = await Promise.all([
-    runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 5000),
-    getDxgiAdapterBudgets(),
-  ]);
-  if (!output) {
-    return { gpus: [], error: "Windows counters: could not read GPU performance counters" };
-  }
-
-  const sections: Record<string, string[]> = {
-    UTIL: [], DEDICATED_USED: [], DEDICATED_LIMIT: [], SHARED_USED: [], SHARED_LIMIT: [],
-  };
-  let current: string | null = null;
-  for (const rawLine of output.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    const header = line.match(/^---(\w+)---$/);
-    if (header) {
-      current = header[1]!;
-      continue;
+  const queryOnce = async (): Promise<{ gpus: GpuSnapshot[]; error: string | null }> => {
+    const [output, dxgiBudgets] = await Promise.all([
+      runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 5000),
+      getDxgiAdapterBudgets(),
+    ]);
+    if (!output) {
+      return { gpus: [], error: "Windows counters: could not read GPU performance counters" };
     }
-    if (current && sections[current]) sections[current].push(line);
-  }
 
-  const utilByLuid = sumByLuid(sections.UTIL!);
-  const dedicatedUsedByLuid = sumByLuid(sections.DEDICATED_USED!);
-  const dedicatedLimitByLuid = sumByLuid(sections.DEDICATED_LIMIT!);
-  const sharedUsedByLuid = sumByLuid(sections.SHARED_USED!);
-  const sharedLimitByLuid = sumByLuid(sections.SHARED_LIMIT!);
-
-  // Some drivers (observed with unified-memory AMD APUs) only register the
-  // Usage counters and never register the Usage Limit counters, so adapter
-  // detection must not require a Limit counter to be present.
-  const adapterKeys = new Set<string>([
-    ...utilByLuid.keys(),
-    ...dedicatedUsedByLuid.keys(),
-    ...dedicatedLimitByLuid.keys(),
-    ...sharedUsedByLuid.keys(),
-    ...sharedLimitByLuid.keys(),
-  ]);
-  if (adapterKeys.size === 0) {
-    return { gpus: [], error: "Windows counters: no GPU adapters reported" };
-  }
-
-  const gpus: GpuSnapshot[] = Array.from(adapterKeys).map((key, i) => {
-    const dxgi = dxgiBudgets.get(key);
-    const dedicatedTotalBytes = resolveAdapterTotalBytes(dedicatedLimitByLuid.get(key), dxgi, "local");
-    const sharedTotalBytes = resolveAdapterTotalBytes(sharedLimitByLuid.get(key), dxgi, "nonLocal");
-    return {
-      label: `GPU ${i + 1}`,
-      source: "Windows counters",
-      utilizationPercent: utilByLuid.has(key) ? Math.min(100, utilByLuid.get(key)!) : null,
-      dedicatedUsedBytes: dedicatedUsedByLuid.get(key) ?? null,
-      dedicatedTotalBytes,
-      sharedUsedBytes: sharedUsedByLuid.get(key) ?? null,
-      sharedTotalBytes,
+    const sections: Record<string, string[]> = {
+      UTIL: [], DEDICATED_USED: [], DEDICATED_LIMIT: [], SHARED_USED: [], SHARED_LIMIT: [],
     };
-  });
+    let current: string | null = null;
+    for (const rawLine of output.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const header = line.match(/^---(\w+)---$/);
+      if (header) {
+        current = header[1]!;
+        continue;
+      }
+      if (current && sections[current]) sections[current].push(line);
+    }
 
-  gpus.sort((a, b) => (b.dedicatedTotalBytes || 0) - (a.dedicatedTotalBytes || 0));
-  gpus.forEach((g, i) => { g.label = `GPU ${i + 1}`; });
+    const utilByLuid = sumByLuid(sections.UTIL!);
+    const dedicatedUsedByLuid = sumByLuid(sections.DEDICATED_USED!);
+    const dedicatedLimitByLuid = sumByLuid(sections.DEDICATED_LIMIT!);
+    const sharedUsedByLuid = sumByLuid(sections.SHARED_USED!);
+    const sharedLimitByLuid = sumByLuid(sections.SHARED_LIMIT!);
 
-  return { gpus, error: null };
+    // Some drivers (observed with unified-memory AMD APUs) only register the
+    // Usage counters and never register the Usage Limit counters, so adapter
+    // detection must not require a Limit counter to be present.
+    const adapterKeys = new Set<string>([
+      ...utilByLuid.keys(),
+      ...dedicatedUsedByLuid.keys(),
+      ...dedicatedLimitByLuid.keys(),
+      ...sharedUsedByLuid.keys(),
+      ...sharedLimitByLuid.keys(),
+    ]);
+    if (adapterKeys.size === 0) {
+      return { gpus: [], error: "Windows counters: no GPU adapters reported" };
+    }
+
+    const gpus: GpuSnapshot[] = Array.from(adapterKeys).map((key, i) => {
+      const dxgi = dxgiBudgets.get(key);
+      const dedicatedTotalBytes = resolveAdapterTotalBytes(dedicatedLimitByLuid.get(key), dxgi, "local");
+      const sharedTotalBytes = resolveAdapterTotalBytes(sharedLimitByLuid.get(key), dxgi, "nonLocal");
+      return {
+        label: `GPU ${i + 1}`,
+        source: "Windows counters",
+        utilizationPercent: utilByLuid.has(key) ? Math.min(100, utilByLuid.get(key)!) : null,
+        dedicatedUsedBytes: dedicatedUsedByLuid.get(key) ?? null,
+        dedicatedTotalBytes,
+        sharedUsedBytes: sharedUsedByLuid.get(key) ?? null,
+        sharedTotalBytes,
+      };
+    });
+
+    gpus.sort((a, b) => (b.dedicatedTotalBytes || 0) - (a.dedicatedTotalBytes || 0));
+    gpus.forEach((g, i) => { g.label = `GPU ${i + 1}`; });
+
+    return { gpus, error: null };
+  };
+
+  const first = await queryOnce();
+  if (first.gpus.length > 0) return first;
+
+  // Get-Counter can transiently return zero samples for a counter set even
+  // though the counters are registered and working (observed intermittently
+  // on this machine, likely a perf-counter provider hiccup). Retrying once
+  // after a short delay avoids the System tab's displayed GPU set flapping
+  // between "Windows counters" (N GPUs) and a fallback source on every other
+  // 2s poll when the counters are actually fine.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const retry = await queryOnce();
+  return retry.gpus.length > 0 ? retry : first;
 }
 
 export function parseNvidiaSmiCsv(output: string): GpuSnapshot[] {

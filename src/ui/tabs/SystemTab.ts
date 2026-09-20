@@ -25,6 +25,12 @@ function drawBar(canvas: RenderContext["canvas"], x: number, y: number, width: n
   canvas.moveTo(x, y);
   if (filled > 0) fgBg(canvas, color, color, " ".repeat(filled));
   if (width - filled > 0) fgBg(canvas, "border", "border", " ".repeat(width - filled));
+  // fgBg() sets a persistent background color on the canvas that otherwise
+  // bleeds into every subsequent write (including unrelated text/labels on
+  // later rows) until something else changes it. Reset it immediately after
+  // the bar so the background doesn't leak past this widget - most visibly
+  // when the bar is 100% filled with a single solid color.
+  canvas.setBackgroundColor("None");
 }
 
 class SystemPanel extends Control {

@@ -275,6 +275,11 @@ export class MetricsPanel extends Scrollable {
         fgBg(canvas, "border", "border", " ".repeat(empty));
 
         fgBg(canvas, "textMuted", "surface", `  Used `);
+        // fgBg() sets a persistent background color on the canvas that
+        // otherwise bleeds into every subsequent write until something else
+        // changes it (e.g. the "Used" label's "surface" background leaking
+        // into the following text and even the next row/panel).
+        canvas.setBackgroundColor("None");
         fg(canvas, "text", `${formatCtxNum(used)} / ${formatCtxNum(limit)}`);
       } else if (slot.contextSize > 0) {
         fg(canvas, "text", `${formatCtxNum(slot.contextSize)} tok`);

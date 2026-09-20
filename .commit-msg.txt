@@ -1,0 +1,16 @@
+Fix canvas background-color bleed and flaky GPU counter dropouts
+
+- drawBar() in SystemTab and the Ctx-usage bar in MetricsPanel used
+  fgBg() to paint colored segments but never reset the canvas
+  background afterward. FramebufferCanvas background state is
+  persistent (set via setBackgroundColor), so it leaked into
+  subsequent plain fg() writes: observed as a red background bleeding
+  from a 100%-filled CPU bar into its own label and the next row
+  (e.g. "RAM"). Both call sites now reset the background to "None"
+  immediately after drawing.
+- getWindowsCounterGpuSnapshots() now retries once (after a short
+  delay) when Get-Counter transiently reports zero GPU adapters,
+  instead of immediately falling back and causing the System tab's
+  displayed source/GPU count to flap between refreshes.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
