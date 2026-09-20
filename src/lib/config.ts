@@ -611,6 +611,20 @@ export function getLogFile(config: ConfigData): string {
 }
 
 /**
+ * Sibling file (same directory/basename, `.err` extension) that captures the
+ * server's raw stderr via direct OS-level file-descriptor redirection,
+ * independent of `--log-file`. llama.cpp's own `--log-file` only duplicates
+ * output routed through its internal logger (common_log); a crash/assert or
+ * backend error written straight to stderr with `fprintf` bypasses that and
+ * would otherwise be lost, especially once the server is running detached
+ * and this process is no longer alive to pipe/relay it live.
+ */
+export function getErrFile(logFile: string): string {
+  if (/\.log$/i.test(logFile)) return logFile.replace(/\.log$/i, ".err");
+  return `${logFile}.err`;
+}
+
+/**
  * Marker file recording the currently (or most recently) running detached
  * server process, so a later `llama-manager` launch (or `--stop`) can find
  * and manage a server that outlived the process that started it (see

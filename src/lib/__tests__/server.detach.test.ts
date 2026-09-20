@@ -125,4 +125,45 @@ describe("detached session reattach", () => {
 
     process.kill(child.pid!, "SIGTERM");
   }, 15000);
+
+  it("backfills and tails the sibling .err file (raw stderr) on reattach, prefixed for the Logs tab", async () => {
+    const { getSessionFile } = await import("../config");
+
+    const child: ChildProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    const logFile = path.join(tmpDir, "server.log");
+    const errFile = path.join(tmpDir, "server.err");
+    await fs.writeFile(logFile, "srv  llama_server: model loaded\n");
+    // Simulates a crash/assert written straight to stderr with fprintf,
+    // which bypasses llama.cpp's own --log-file logger entirely.
+    await fs.writeFile(errFile, "GGML_ASSERT: some_condition failed\n");
+
+    await fs.ensureDir(path.dirname(getSessionFile()));
+    await fs.writeJson(getSessionFile(), {
+      pid: child.pid,
+      startedAt: Date.now(),
+      activeVersion: "test-version",
+      logFile,
+      errFile,
+    });
+
+    const { detectExistingSession, serverLogLines } = await import("../server");
+
+    detectExistingSession();
+
+    // The stderr backfill is prefixed so it's distinguishable inline in the
+    // merged Logs tab view without needing a separate UI surface.
+    expect(serverLogLines.some((l) => l === "[stderr] GGML_ASSERT: some_condition failed")).toBe(true);
+
+    // New stderr output (e.g. a later crash) should keep showing up too.
+    await fs.appendFile(errFile, "another stderr line\n");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(serverLogLines.some((l) => l === "[stderr] another stderr line")).toBe(true);
+
+    process.kill(child.pid!, "SIGTERM");
+  }, 15000);
 });

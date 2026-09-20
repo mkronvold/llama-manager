@@ -142,6 +142,9 @@ still overridable via `XDG_*_HOME` env vars if explicitly set.
 | Models | `~/.cache/huggingface/llama-manager/` | `~/.cache/huggingface/llama-manager/` (unchanged — matches Hugging Face tooling's own cross-platform default) |
 | Tasks DB | `~/.local/share/llama-manager/tasks.db` | `%LOCALAPPDATA%\llama-manager\tasks.db` |
 | Server log | `~/.local/state/llama-manager/logs/server.<timestamp>.log` | `%LOCALAPPDATA%\llama-manager\state\logs\server.<timestamp>.log` |
+| Server stderr | `~/.local/state/llama-manager/logs/server.<timestamp>.err` | `%LOCALAPPDATA%\llama-manager\state\logs\server.<timestamp>.err` |
+
+Raw stderr (crashes, asserts, backend/driver errors that bypass llama.cpp's own `--log-file` logger) is captured to the sibling `.err` file via direct OS-level redirection, so it survives even after "Exit Now" leaves the server running detached. It's merged into the Logs tab inline, prefixed with `[stderr]`.
 
 
 ## Themes

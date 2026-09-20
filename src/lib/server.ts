@@ -3,7 +3,7 @@ import { EventEmitter } from "events";
 import path from "path";
 import os from "os";
 import fs from "fs-extra";
-import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getLogsDir, getSessionFile, getActivePresets, getActiveFreeFormArgs } from "./config";
+import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getErrFile, getLogsDir, getSessionFile, getActivePresets, getActiveFreeFormArgs } from "./config";
 import { logParser } from "./logparser";
 import { processLine as processMetricLine, reset as resetMetrics } from "./metricstracker";
 import { processModelLine, resetModelInfo } from "../ui/specialized/LoadedModelPanel";
@@ -18,6 +18,7 @@ import { detectForkFromFolder, resolveBinaryName, isForkCompatibleWithPreset, is
 let serverProcess: ChildProcess | null = null;
 let serverStartTime: number | null = null;
 let currentLogFile: string | null = null;
+let currentErrFile: string | null = null;
 
 // A server left running via "Exit Now" outlives the process that spawned it, so a
 // later launch of llama-manager has no `ChildProcess` handle for it — only what was
@@ -58,6 +59,7 @@ interface SessionFileInfo {
   startedAt: number;
   activeVersion: string | null;
   logFile: string | null;
+  errFile?: string | null;
 }
 
 function writeSessionFile(info: SessionFileInfo): void {
@@ -113,6 +115,13 @@ export function detectExistingSession(): SessionFileInfo | null {
     // detached server.
     tailDetachedLogFile(info.logFile);
     taskStore.setLogFile(info.logFile);
+  }
+  if (info.errFile) {
+    currentErrFile = info.errFile;
+    // Same idea for stderr: it's captured to its own file at the OS level
+    // (see getErrFile()) independent of whether any llama-manager process is
+    // alive, so backfill/tail it too and merge it into the same log view.
+    tailErrFile(info.errFile);
   }
   return info;
 }
@@ -224,6 +233,74 @@ function stopDetachedLogTail(): void {
   }
 }
 
+let errTailStop: (() => void) | null = null;
+
+/**
+ * Backfills and tails the sibling `.err` file (see `getErrFile()`) that
+ * captures the server's raw stderr via direct file-descriptor redirection.
+ * Unlike `tailDetachedLogFile()`, this does not reset metrics/model-info or
+ * clear the log buffer — it only appends prefixed lines alongside whatever
+ * the main log tailer/relay already produced, for both a freshly-spawned
+ * session (no live stderr pipe to relay from anymore) and a reattached one.
+ */
+function tailErrFile(filePath: string): void {
+  if (errTailStop) {
+    errTailStop();
+    errTailStop = null;
+  }
+
+  let position = 0;
+  const emit = (line: string) => {
+    if (line.trim()) ingestLogLine(`[stderr] ${line}`);
+  };
+
+  try {
+    if (fs.pathExistsSync(filePath)) {
+      const content = fs.readFileSync(filePath, "utf-8");
+      for (const line of content.split("\n")) emit(line);
+      position = Buffer.byteLength(content, "utf-8");
+    }
+  } catch {
+    // best-effort; fall through to polling, which will retry
+  }
+
+  let stopped = false;
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.size < position) position = 0; // file rotated/truncated
+      if (stat.size === position) return;
+
+      const fd = await fs.open(filePath, "r");
+      try {
+        const buf = Buffer.alloc(stat.size - position);
+        await fs.read(fd, buf, 0, buf.length, position);
+        position += buf.length;
+        for (const line of buf.toString("utf-8").split("\n")) emit(line);
+      } finally {
+        await fs.close(fd);
+      }
+    } catch {
+      // Err file may not exist yet or be temporarily locked — best-effort,
+      // try again next tick.
+    }
+  };
+
+  const interval = setInterval(poll, 1000);
+  errTailStop = () => {
+    stopped = true;
+    clearInterval(interval);
+  };
+}
+
+function stopErrTail(): void {
+  if (errTailStop) {
+    errTailStop();
+    errTailStop = null;
+  }
+}
+
 /** Clears the in-memory log buffer (does not touch the on-disk log file). */
 export function clearServerLog(): void {
   serverLogLines.length = 0;
@@ -256,6 +333,16 @@ export function getCurrentLogFile(config?: ConfigData | null): string | null {
     .sort();
   if (files.length === 0) return null;
   return path.join(logsDir, files[files.length - 1]);
+}
+
+/**
+ * Returns the path to the sibling `.err` file (raw stderr, see
+ * `getErrFile()`) for the current/most recent log file, if known.
+ */
+export function getCurrentErrFile(config?: ConfigData | null): string | null {
+  if (currentErrFile) return currentErrFile;
+  const logFile = getCurrentLogFile(config);
+  return logFile ? getErrFile(logFile) : null;
 }
 
 export function listDevices(config: ConfigData): string {
@@ -323,8 +410,23 @@ export function startServer(config: ConfigData): Promise<number> {
       currentLogFile = logFile;
       await fs.ensureDir(path.dirname(logFile));
       stopDetachedLogTail();
+      stopErrTail();
       taskStore.setLogFile(logFile);
       const logStream = await fs.createWriteStream(logFile, { flags: "a" });
+
+      // Raw stderr (crashes, GGML asserts, backend/driver errors) is often
+      // written directly with fprintf and never passed through llama.cpp's
+      // own logger, so it would not appear in `--log-file` at all. Rather
+      // than piping it through this process (which stops working the moment
+      // this process exits, since "Exit Now" leaves the server running
+      // detached), redirect the child's stderr straight to a file at the OS
+      // level: the descriptor is inherited by the child at spawn time, so it
+      // keeps writing to disk regardless of whether llama-manager is still
+      // running. See getErrFile()/tailErrFile().
+      const errFile = getErrFile(logFile);
+      currentErrFile = errFile;
+      await fs.ensureDir(path.dirname(errFile));
+      const errFd = fs.openSync(errFile, "a");
 
       const args = buildArgs(config, logFile);
       serverStartTime = Date.now();
@@ -332,15 +434,16 @@ export function startServer(config: ConfigData): Promise<number> {
       // — "Exit Now" is meant to leave it running headless, but on Windows an
       // attached child stays tied to this process's console/Job Object and
       // gets torn down by the OS when this process exits, even without any
-      // explicit kill. Piping stdout/stderr below is unaffected by this: it's
-      // only used for live in-app log tailing while both processes are
-      // alive — the binary already writes its own `--log-file` independently,
-      // so on-disk logging continues even after this process exits.
+      // explicit kill. Piping stdout below is unaffected by this: it's only
+      // used for live in-app log tailing while both processes are alive —
+      // the binary already writes its own `--log-file` independently, so
+      // on-disk logging continues even after this process exits.
       serverProcess = spawn(binary, args, {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", errFd],
         detached: true,
         windowsHide: true,
       });
+      fs.closeSync(errFd); // child already has its own inherited handle
       serverProcess.unref();
       detachedSessionPid = null;
       detachedSessionStartedAt = null;
@@ -349,10 +452,15 @@ export function startServer(config: ConfigData): Promise<number> {
         startedAt: serverStartTime,
         activeVersion: config.activeVersion ?? null,
         logFile,
+        errFile,
       });
 
       serverProcess.stdout?.pipe(logStream);
-      serverProcess.stderr?.pipe(logStream);
+      // stderr is no longer a Node stream (redirected to errFd above), so
+      // tail the resulting file the same way a reattached session's stderr
+      // is tailed — this also means live and reattached sessions share one
+      // code path for stderr instead of two.
+      tailErrFile(errFile);
 
       const relay = (stream: NodeJS.ReadableStream | null) => {
         let buf = "";
@@ -366,7 +474,6 @@ export function startServer(config: ConfigData): Promise<number> {
         });
       };
       relay(serverProcess.stdout);
-      relay(serverProcess.stderr);
 
       statusEmitter.emit("change");
       serverProcess.on("error", (err) => reject(err));
@@ -378,6 +485,7 @@ export function startServer(config: ConfigData): Promise<number> {
         if (wasRunning) {
           resetMetrics();
           resetModelInfo();
+          stopErrTail();
         }
         if (wasRunning && code !== 0 && code !== null) {
           serverLogLines.push(`[server] Process exited with code ${code}`);
@@ -436,6 +544,7 @@ export function stopServer(): Promise<void> {
       detachedSessionStartedAt = null;
       clearSessionFile();
       stopDetachedLogTail();
+      stopErrTail();
       resetMetrics();
       resetModelInfo();
       resolve();
