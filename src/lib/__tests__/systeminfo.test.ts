@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   sumByLuid,
   sampleCpuPercent,
+  resetCpuSampler,
+  cpuPercentBetween,
+  smoothCpuPercent,
   parseNvidiaSmiCsv,
   parseAmdSmiJson,
   parseVulkanProbeOutput,
@@ -14,6 +17,8 @@ describe("resolveAdapterTotalBytes", () => {
     luidKey: "luid_0x00000000_0xa672528b_phys_0",
     name: "AMD Radeon(TM) 8060S Graphics",
     isSoftware: false,
+    dedicatedVideoMemoryBytes: 68541677568,
+    sharedSystemMemoryBytes: 51166453760,
     localBudgetBytes: 118889820160,
     nonLocalBudgetBytes: null,
   };
@@ -22,16 +27,29 @@ describe("resolveAdapterTotalBytes", () => {
     expect(resolveAdapterTotalBytes(1000, dxgi, "local")).toBe(1000);
   });
 
-  it("falls back to the DXGI local budget when the Limit counter is missing", () => {
+  it("falls back to the DXGI adapter capacity when the Limit counter is missing", () => {
     // Reproduces the observed bug: an AMD unified-memory APU registers
     // Dedicated/Shared Usage counters but never registers a Usage Limit
     // counter, so the Limit map has no entry for this adapter.
-    expect(resolveAdapterTotalBytes(null, dxgi, "local")).toBe(118889820160);
-    expect(resolveAdapterTotalBytes(undefined, dxgi, "local")).toBe(118889820160);
+    expect(resolveAdapterTotalBytes(null, dxgi, "local")).toBe(68541677568);
+    expect(resolveAdapterTotalBytes(undefined, dxgi, "local")).toBe(68541677568);
+    expect(resolveAdapterTotalBytes(null, dxgi, "nonLocal")).toBe(51166453760);
   });
 
-  it("does not use the DXGI non-local budget when it is zero/unavailable", () => {
-    expect(resolveAdapterTotalBytes(null, dxgi, "nonLocal")).toBeNull();
+  it("prefers the fixed adapter capacity over the dynamic DXGI budget", () => {
+    // The budget spans the combined dedicated+shared pool on a unified-memory
+    // APU, so using it as the "Dedicated VRAM" total overstated capacity.
+    expect(resolveAdapterTotalBytes(null, dxgi, "local")).not.toBe(dxgi.localBudgetBytes);
+  });
+
+  it("falls back to the DXGI budget when the descriptor reports no capacity", () => {
+    const noCapacity: DxgiAdapterBudget = { ...dxgi, dedicatedVideoMemoryBytes: null };
+    expect(resolveAdapterTotalBytes(null, noCapacity, "local")).toBe(118889820160);
+  });
+
+  it("does not invent a non-local total when neither capacity nor budget is available", () => {
+    const bare: DxgiAdapterBudget = { ...dxgi, sharedSystemMemoryBytes: null, nonLocalBudgetBytes: null };
+    expect(resolveAdapterTotalBytes(null, bare, "nonLocal")).toBeNull();
   });
 
   it("never uses budgets from a software/basic-render adapter", () => {
@@ -79,8 +97,63 @@ describe("sumByLuid (GPU perf-counter aggregation)", () => {
 
 describe("sampleCpuPercent", () => {
   it("resolves a percentage between 0 and 100", async () => {
+    resetCpuSampler();
     const percent = await sampleCpuPercent(50);
     expect(percent === null || (percent >= 0 && percent <= 100)).toBe(true);
+  });
+
+  it("reuses the retained sample so a second call does not sleep again", async () => {
+    resetCpuSampler();
+    await sampleCpuPercent(50);
+    // The retained sample must age past the minimum window before it is usable.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const started = Date.now();
+    const percent = await sampleCpuPercent();
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(percent === null || (percent >= 0 && percent <= 100)).toBe(true);
+  });
+});
+
+describe("cpuPercentBetween", () => {
+  it("computes busy percentage from idle/total deltas", () => {
+    expect(cpuPercentBetween({ idle: 0, total: 0 }, { idle: 250, total: 1000 })).toBeCloseTo(75);
+    expect(cpuPercentBetween({ idle: 100, total: 200 }, { idle: 1100, total: 1200 })).toBeCloseTo(0);
+  });
+
+  it("returns null when no time elapsed, instead of dividing by zero", () => {
+    expect(cpuPercentBetween({ idle: 5, total: 10 }, { idle: 5, total: 10 })).toBeNull();
+  });
+
+  it("clamps out-of-range results that coarse Windows tick accounting can produce", () => {
+    // Windows accumulates CPU time on the ~15.6ms scheduler tick, so idle can
+    // briefly appear to grow faster than total across a short window.
+    expect(cpuPercentBetween({ idle: 0, total: 0 }, { idle: 1200, total: 1000 })).toBe(0);
+    expect(cpuPercentBetween({ idle: -50, total: 0 }, { idle: -50, total: 1000 })).toBe(100);
+  });
+});
+
+describe("smoothCpuPercent", () => {
+  it("adopts the first reading verbatim", () => {
+    expect(smoothCpuPercent(null, 42)).toBe(42);
+  });
+
+  it("damps a spike instead of jumping straight to it", () => {
+    // The real-world symptom: consecutive accurate 1s samples legitimately
+    // swing between ~10% and 100% under inference, which reads as broken.
+    const smoothed = smoothCpuPercent(10, 100);
+    expect(smoothed).toBeGreaterThan(10);
+    expect(smoothed).toBeLessThan(100);
+  });
+
+  it("converges toward a steady value", () => {
+    let value: number | null = 0;
+    for (let i = 0; i < 25; i++) value = smoothCpuPercent(value, 50);
+    expect(value).toBeCloseTo(50, 1);
+  });
+
+  it("keeps the previous value when a reading is unavailable", () => {
+    expect(smoothCpuPercent(30, null)).toBe(30);
+    expect(smoothCpuPercent(null, null)).toBeNull();
   });
 });
 

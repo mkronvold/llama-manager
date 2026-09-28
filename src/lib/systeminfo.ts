@@ -49,37 +49,104 @@ export const DEFAULT_GPU_TELEMETRY: GpuTelemetrySettings = {
   allowAmdSmiWindows: false,
 };
 
-/**
- * Samples CPU utilization by taking two os.cpus() readings `sampleMs` apart and
- * computing the delta of busy vs. idle ticks across all cores. A single
- * instantaneous os.cpus() reading only gives cumulative totals since boot, which
- * is not useful for a "current utilization" gauge.
- */
-export function sampleCpuPercent(sampleMs = 200): Promise<number | null> {
-  const readTotals = () => {
-    const cpus = os.cpus();
-    let idle = 0;
-    let total = 0;
-    for (const cpu of cpus) {
-      idle += cpu.times.idle;
-      total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.idle + cpu.times.irq;
-    }
-    return { idle, total };
-  };
+interface CpuTotals {
+  idle: number;
+  total: number;
+}
 
-  const start = readTotals();
+interface CpuSample extends CpuTotals {
+  at: number;
+}
+
+// os.cpus() reports CPU time in milliseconds, but Windows only accumulates it
+// on the scheduler tick (~15.6ms). Over a short window the per-core counts are
+// therefore heavily quantized: measured on a 32-core APU under a steady ~55%
+// load, 200ms windows returned values as far apart as 17% and 88%, which is
+// what made the System tab's CPU gauge spike to 100%. A window of at least
+// ~750ms averages over enough ticks to be stable.
+const MIN_CPU_WINDOW_MS = 750;
+// Beyond this, a retained sample stops describing "now" (e.g. the poll loop was
+// paused), so we fall back to taking a fresh short-window sample instead.
+const MAX_CPU_WINDOW_MS = 15_000;
+// Even with an accurate window, instantaneous system-wide CPU load is genuinely
+// bursty under inference (verified against
+// '\Processor Information(_Total)\% Processor Time', which swings just as far
+// between consecutive 1s samples). Task Manager smooths its gauge rather than
+// showing raw per-interval values, so we apply an exponential moving average to
+// keep the System tab readable instead of flickering between 10% and 100%.
+const CPU_SMOOTHING_ALPHA = 0.35;
+
+let lastCpuSample: CpuSample | null = null;
+let smoothedCpuPercent: number | null = null;
+
+function readCpuTotals(): CpuTotals {
+  const cpus = os.cpus();
+  let idle = 0;
+  let total = 0;
+  for (const cpu of cpus) {
+    idle += cpu.times.idle;
+    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.idle + cpu.times.irq;
+  }
+  return { idle, total };
+}
+
+export function cpuPercentBetween(start: CpuTotals, end: CpuTotals): number | null {
+  const idleDelta = end.idle - start.idle;
+  const totalDelta = end.total - start.total;
+  if (totalDelta <= 0) return null;
+  const percent = (1 - idleDelta / totalDelta) * 100;
+  return Math.max(0, Math.min(100, percent));
+}
+
+/** Clears the retained CPU sample and smoothing state. Exposed for tests. */
+export function resetCpuSampler(): void {
+  lastCpuSample = null;
+  smoothedCpuPercent = null;
+}
+
+/**
+ * Applies the exponential moving average used to damp the CPU gauge. Exported
+ * so the smoothing behaviour can be unit-tested without touching real os.cpus()
+ * timings.
+ */
+export function smoothCpuPercent(previous: number | null, raw: number | null): number | null {
+  if (raw === null) return previous;
+  if (previous === null) return raw;
+  return previous + CPU_SMOOTHING_ALPHA * (raw - previous);
+}
+
+/**
+ * Reports CPU utilization from the delta of busy vs. idle ticks across all
+ * cores. A single instantaneous os.cpus() reading only gives cumulative totals
+ * since boot, so two readings are always required.
+ *
+ * Whenever possible the previous call's reading is reused as the start of the
+ * window, so the measurement spans the caller's whole poll interval (seconds)
+ * rather than a freshly-slept `sampleMs`. That both removes the per-poll sleep
+ * and makes the value far less noisy — see MIN_CPU_WINDOW_MS.
+ */
+export function sampleCpuPercent(sampleMs = MIN_CPU_WINDOW_MS): Promise<number | null> {
+  const now = Date.now();
+  const current = readCpuTotals();
+  const previous = lastCpuSample;
+  const windowMs = previous ? now - previous.at : 0;
+
+  if (previous && windowMs >= MIN_CPU_WINDOW_MS && windowMs <= MAX_CPU_WINDOW_MS) {
+    lastCpuSample = { ...current, at: now };
+    smoothedCpuPercent = smoothCpuPercent(smoothedCpuPercent, cpuPercentBetween(previous, current));
+    return Promise.resolve(smoothedCpuPercent);
+  }
+
+  // No usable retained sample (first call, or the poll loop stalled), so the
+  // smoothing history no longer describes the current window either.
+  smoothedCpuPercent = null;
   return new Promise((resolve) => {
     setTimeout(() => {
-      const end = readTotals();
-      const idleDelta = end.idle - start.idle;
-      const totalDelta = end.total - start.total;
-      if (totalDelta <= 0) {
-        resolve(null);
-        return;
-      }
-      const percent = (1 - idleDelta / totalDelta) * 100;
-      resolve(Math.max(0, Math.min(100, percent)));
-    }, sampleMs);
+      const end = readCpuTotals();
+      lastCpuSample = { ...end, at: Date.now() };
+      smoothedCpuPercent = cpuPercentBetween(current, end);
+      resolve(smoothedCpuPercent);
+    }, Math.max(sampleMs, MIN_CPU_WINDOW_MS));
   });
 }
 
@@ -228,6 +295,10 @@ export interface DxgiAdapterBudget {
   luidKey: string;
   name: string;
   isSoftware: boolean;
+  /** DXGI_ADAPTER_DESC1.DedicatedVideoMemory — Task Manager's "Dedicated GPU memory" total. */
+  dedicatedVideoMemoryBytes: number | null;
+  /** DXGI_ADAPTER_DESC1.SharedSystemMemory — Task Manager's "Shared GPU memory" total. */
+  sharedSystemMemoryBytes: number | null;
   localBudgetBytes: number | null;
   nonLocalBudgetBytes: number | null;
 }
@@ -329,7 +400,7 @@ while ($true) {
     if ([LmDxgi]::QueryVideoMemoryInfo($adapter3, 0, 0, [ref]$local) -eq 0) { $localBudget = $local.Budget }
     if ([LmDxgi]::QueryVideoMemoryInfo($adapter3, 0, 1, [ref]$nonlocal) -eq 0) { $nonLocalBudget = $nonlocal.Budget }
   }
-  "$luid,$($desc.Description),$($desc.Flags),$localBudget,$nonLocalBudget"
+  "$luid,$($desc.Description),$($desc.Flags),$localBudget,$nonLocalBudget,$($desc.DedicatedVideoMemory.ToUInt64()),$($desc.SharedSystemMemory.ToUInt64())"
   $i++
 }
 `;
@@ -341,15 +412,23 @@ while ($true) {
     const line = rawLine.trim();
     if (!line) continue;
     const parts = line.split(",");
-    if (parts.length < 5) continue;
+    if (parts.length < 7) continue;
+    // The adapter description sits between the LUID and the trailing numeric
+    // fields and can itself contain commas, so the numbers are read from the
+    // end of the line rather than by fixed index.
+    const n = parts.length;
     const luidKey = parts[0]!.toLowerCase();
-    const name = parts[1]!.trim();
-    const flags = Number(parts[2]);
-    const localBudget = Number(parts[3]);
-    const nonLocalBudget = Number(parts[4]);
+    const name = parts.slice(1, n - 5).join(",").trim();
+    const flags = Number(parts[n - 5]);
+    const localBudget = Number(parts[n - 4]);
+    const nonLocalBudget = Number(parts[n - 3]);
+    const dedicatedVideoMemory = Number(parts[n - 2]);
+    const sharedSystemMemory = Number(parts[n - 1]);
     const existing = result.get(luidKey);
     const localBudgetBytes = Number.isFinite(localBudget) && localBudget >= 0 ? localBudget : null;
     const nonLocalBudgetBytes = Number.isFinite(nonLocalBudget) && nonLocalBudget >= 0 ? nonLocalBudget : null;
+    const dedicatedVideoMemoryBytes = Number.isFinite(dedicatedVideoMemory) && dedicatedVideoMemory > 0 ? dedicatedVideoMemory : null;
+    const sharedSystemMemoryBytes = Number.isFinite(sharedSystemMemory) && sharedSystemMemory > 0 ? sharedSystemMemory : null;
     // Multiple DXGI adapter objects can share the same LUID (hybrid/compute
     // nodes for one physical GPU); keep the entry with the largest budget.
     if (existing && (existing.localBudgetBytes || 0) >= (localBudgetBytes || 0)) continue;
@@ -357,6 +436,8 @@ while ($true) {
       luidKey,
       name,
       isSoftware: (flags & 0x2) !== 0,
+      dedicatedVideoMemoryBytes,
+      sharedSystemMemoryBytes,
       localBudgetBytes,
       nonLocalBudgetBytes,
     });
@@ -375,40 +456,73 @@ export function resolveAdapterTotalBytes(
 ): number | null {
   if (limitBytes !== undefined && limitBytes !== null) return limitBytes;
   if (!dxgi || dxgi.isSoftware) return null;
+  // Prefer the adapter descriptor's fixed capacity: it is what Task Manager
+  // shows as the Dedicated/Shared GPU memory total. The DXGI *budget* is a
+  // dynamic, driver-chosen allowance and on unified-memory APUs it spans the
+  // combined dedicated+shared pool (measured 110.72GB where the real dedicated
+  // carve-out is 63.83GB), which made the System tab's totals look wrong.
+  const capacity = segment === "local" ? dxgi.dedicatedVideoMemoryBytes : dxgi.sharedSystemMemoryBytes;
+  if (capacity && capacity > 0) return capacity;
   const budget = segment === "local" ? dxgi.localBudgetBytes : dxgi.nonLocalBudgetBytes;
   return budget && budget > 0 ? budget : null;
 }
 
-async function getWindowsCounterGpuSnapshots(): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {
-  if (os.platform() !== "win32") {
+// Enumerating '\GPU Engine(*)' can take several seconds on machines with many
+// cores/processes (measured 3.0-3.6s for the combined query on a 32-core APU),
+// and a timeout here silently demotes the System tab to a less accurate
+// fallback source, so this is deliberately generous.
+const GPU_COUNTER_TIMEOUT_MS = 15000;
+
+async function getWindowsCounterGpuSnapshots(): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {  if (os.platform() !== "win32") {
     return { gpus: [], error: "Windows performance counters are only available on Windows" };
   }
 
-  // A single powershell invocation gathers all four counter sets to avoid
-  // paying process-spawn overhead four times per refresh. Errors from any
-  // individual Get-Counter call are swallowed so one missing counter set
-  // doesn't blank out the others.
+  // A single powershell invocation gathers all counter sets to avoid paying
+  // process-spawn overhead per refresh, and issues them as one combined
+  // Get-Counter query: querying the five paths separately measured 5.1-5.4s on
+  // a 32-core APU, which exceeded the caller's timeout and silently demoted the
+  // System tab to a fallback source. One combined query measures ~3.0-3.6s.
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
-function Emit($counterPath) {
-  $samples = (Get-Counter $counterPath -ErrorAction SilentlyContinue).CounterSamples
-  foreach ($s in $samples) { "$($s.InstanceName),$($s.CookedValue)" }
+$paths = @(
+  '\\GPU Engine(*)\\Utilization Percentage',
+  '\\GPU Adapter Memory(*)\\Dedicated Usage',
+  '\\GPU Adapter Memory(*)\\Dedicated Usage Limit',
+  '\\GPU Adapter Memory(*)\\Shared Usage',
+  '\\GPU Adapter Memory(*)\\Shared Usage Limit'
+)
+$buckets = [ordered]@{ UTIL = @(); DEDICATED_USED = @(); DEDICATED_LIMIT = @(); SHARED_USED = @(); SHARED_LIMIT = @() }
+function Classify($samplePath) {
+  if ($samplePath -like '*\\utilization percentage') { return 'UTIL' }
+  if ($samplePath -like '*\\dedicated usage limit') { return 'DEDICATED_LIMIT' }
+  if ($samplePath -like '*\\dedicated usage') { return 'DEDICATED_USED' }
+  if ($samplePath -like '*\\shared usage limit') { return 'SHARED_LIMIT' }
+  if ($samplePath -like '*\\shared usage') { return 'SHARED_USED' }
+  return $null
 }
-"---UTIL---"
-Emit '\\GPU Engine(*)\\Utilization Percentage'
-"---DEDICATED_USED---"
-Emit '\\GPU Adapter Memory(*)\\Dedicated Usage'
-"---DEDICATED_LIMIT---"
-Emit '\\GPU Adapter Memory(*)\\Dedicated Usage Limit'
-"---SHARED_USED---"
-Emit '\\GPU Adapter Memory(*)\\Shared Usage'
-"---SHARED_LIMIT---"
-Emit '\\GPU Adapter Memory(*)\\Shared Usage Limit'
+function Collect($samples) {
+  foreach ($s in $samples) {
+    $key = Classify $s.Path
+    if ($key) { $buckets[$key] += "$($s.InstanceName),$($s.CookedValue)" }
+  }
+}
+Collect (Get-Counter -Counter $paths -ErrorAction SilentlyContinue).CounterSamples
+if ((($buckets.Values | ForEach-Object { $_.Count }) | Measure-Object -Sum).Sum -eq 0) {
+  # Get-Counter's array form fails as a unit if any single path is unknown on
+  # this machine, so retry each path independently before giving up.
+  foreach ($p in $paths) {
+    Collect (Get-Counter -Counter $p -ErrorAction SilentlyContinue).CounterSamples
+  }
+}
+foreach ($key in $buckets.Keys) {
+  "---$key---"
+  $buckets[$key]
+}
 `;
 
   const queryOnce = async (): Promise<{ gpus: GpuSnapshot[]; error: string | null }> => {
     const [output, dxgiBudgets] = await Promise.all([
-      runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 5000),
+      runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], GPU_COUNTER_TIMEOUT_MS),
       getDxgiAdapterBudgets(),
     ]);
     if (!output) {

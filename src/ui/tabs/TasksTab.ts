@@ -1,6 +1,7 @@
 import { Control } from "../../framework/Control";
 import { Column, Row } from "../../framework/Layout";
 import { Table } from "../../framework/widgets/Table";
+import type { TableColumn } from "../../framework/widgets/Table";
 import { Section } from "../../framework/widgets/Section";
 import { Spacer } from "../../framework/widgets/Spacer";
 import { fg, fgBg } from "../../lib/theme";
@@ -151,6 +152,8 @@ export class TasksControl extends Control {
   protected _contentRow: Row;
   protected _sortField: TaskSortField = "timestamp";
   protected _sortDir: TaskSortDir = "desc";
+  protected _detailsHidden = false;
+  protected _detailsVisible = true;
 
   protected _view: "table" | "charts" = "table";
   protected _tableColumn: Column;
@@ -226,8 +229,8 @@ export class TasksControl extends Control {
     this._column.layout({ x, y, width, height });
 
     if (this._view === "table") {
-      const showDetails = width >= DETAILS_WIDTH + 26;
-      this._detailsPanel.visible = showDetails;
+      this._detailsVisible = !this._detailsHidden && width >= DETAILS_WIDTH + 26;
+      this._detailsPanel.visible = this._detailsVisible;
 
       const total = taskStore.getTotalCount();
 
@@ -264,7 +267,7 @@ export class TasksControl extends Control {
       .muted("  Avg TG ")
       .success(`${stats.avgOutputSpeed.toFixed(1)} t/s`);
 
-    const help = this._view === "table" ? "c charts  s sort  r reverse" : "c table  b day/hour";
+    const help = this._view === "table" ? "c charts  h sidebar  s sort  r reverse" : "c table  b day/hour";
     const statsLen = this._summary.segments.reduce((a, s) => a + s.text.length, 0);
     const padLen = Math.max(1, this.rect.width - statsLen - help.length);
     statsText.muted(" ".repeat(padLen)).muted(help);
@@ -273,18 +276,41 @@ export class TasksControl extends Control {
   updateColumns(): void {
     const sortIndicator = this._sortDir === "asc" ? "▲" : "▼";
 
-    this._table.columns = [
-      { label: "Date", width: 11, align: "left" as const, headerSuffix: this._sortField === "timestamp" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => formatDate(r.timestamp) },
+    const columns: TableColumn[] = [
+      { label: "Date", width: 6, align: "left" as const, headerSuffix: this._sortField === "timestamp" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => formatDate(r.timestamp).slice(5) },
       { label: "Time", width: 8, align: "left" as const, format: (_c, r: TaskMetrics) => formatTime(r.timestamp) },
       { label: "ID", width: 6, align: "right" as const, headerSuffix: this._sortField === "taskId" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => `#${r.taskId}` },
       { label: "Slot", width: 4, align: "left" as const, headerSuffix: this._sortField === "slotId" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => `S${r.slotId}` },
       { label: "Profile", width: 8, flex: 1, align: "left" as const, format: (_c, r: TaskMetrics) => r.profile || "-" },
       { label: "PP", width: 10, align: "right" as const, headerSuffix: this._sortField === "promptSpeed" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => `${r.promptSpeed.toFixed(1)} t/s` },
       { label: "TG", width: 10, align: "right" as const, headerSuffix: this._sortField === "outputSpeed" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => `${r.outputSpeed.toFixed(1)} t/s` },
-      { label: "Prompt", width: 8, align: "right" as const, headerSuffix: this._sortField === "promptTokens" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => String(r.promptTokens) },
-      { label: "Output", width: 8, align: "right" as const, headerSuffix: this._sortField === "outputTokens" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => String(r.outputTokens) },
-      { label: "Duration", width: 8, align: "right" as const, headerSuffix: this._sortField === "totalTimeMs" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => formatMs(r.totalTimeMs) },
+      { label: "In", width: 8, align: "right" as const, headerSuffix: this._sortField === "promptTokens" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => String(r.promptTokens) },
+      { label: "Out", width: 8, align: "right" as const, headerSuffix: this._sortField === "outputTokens" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => String(r.outputTokens) },
     ];
+
+    if (this._detailsVisible) {
+      columns.push({
+        label: "Duration",
+        width: 8,
+        align: "right" as const,
+        headerSuffix: this._sortField === "totalTimeMs" ? sortIndicator : undefined,
+        format: (_c, r: TaskMetrics) => formatMs(r.totalTimeMs),
+      });
+    } else {
+      columns.push(
+        { label: "PT", width: 8, align: "right" as const, format: (_c, r: TaskMetrics) => formatMs(r.promptTimeMs) },
+        { label: "ET", width: 8, align: "right" as const, format: (_c, r: TaskMetrics) => formatMs(r.evalTimeMs) },
+        {
+          label: "TT",
+          width: 8,
+          align: "right" as const,
+          headerSuffix: this._sortField === "totalTimeMs" ? sortIndicator : undefined,
+          format: (_c, r: TaskMetrics) => formatMs(r.totalTimeMs),
+        },
+      );
+    }
+
+    this._table.columns = columns;
   }
 
   handleKey(key: string): boolean {
@@ -302,6 +328,14 @@ export class TasksControl extends Control {
         return true;
       }
       return this._chartsControl.handleKey(key);
+    }
+
+    if (key === "h" || key === "H") {
+      this._detailsHidden = !this._detailsHidden;
+      this.markDirty();
+      this._ctx?.forceRender();
+      this._ctx?.showMessage(this._detailsHidden ? "Task details sidebar: hidden" : "Task details sidebar: shown");
+      return true;
     }
 
     if (key === "s") {
