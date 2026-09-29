@@ -192,9 +192,9 @@ class SystemPanel extends Control {
     // subtracted from it (which would disagree with Task Manager).
     if (snap.sharedGpuRamBytes !== null && snap.sharedGpuRamBytes > 0) {
       canvas.moveTo(x, cy);
-      fg(canvas, "textMuted", "  of which GPU".padEnd(labelWidth));
+      fg(canvas, "textMuted", "  Shared".padEnd(labelWidth));
       fg(canvas, "text", formatSize(snap.sharedGpuRamBytes));
-      fg(canvas, "textMuted", "  shared VRAM is RAM, not extra");
+      fg(canvas, "textMuted", "  with GPU");
       cy++;
     }
     cy++;
@@ -301,9 +301,13 @@ class SystemPanel extends Control {
       };
       drawPart("  Dedicated VRAM", res.dedicatedBytes, "success");
       drawPart("  Shared (RAM)", res.sharedBytes, "success");
-      // Always amber: this is a "where did it go" proportion, not a budget, so
-      // the usual >75%/>90% thresholds would be misleading.
-      drawPart("  Elsewhere", res.elsewhereBytes, "warning");
+      // Deliberately not called "evicted": this bucket is everything committed
+      // that is not in GPU memory, and a measured part of it is resident in
+      // host RAM. How much is genuinely paged/compressed cannot be attributed
+      // per-process, so the label stays disjunctive. Always amber because it
+      // is a proportion, not a budget - the usual 75/90% thresholds would be
+      // meaningless here.
+      drawPart("  Host RAM / paged", res.elsewhereBytes, "warning");
     }
 
     const pressure = snap.pressure;
