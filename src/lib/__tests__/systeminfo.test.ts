@@ -7,6 +7,8 @@ import {
   smoothCpuPercent,
   parseMemoryPressure,
   buildResidency,
+  formatAdapterName,
+  findDxgiAdapter,
   parseNvidiaSmiCsv,
   parseAmdSmiJson,
   parseVulkanProbeOutput,
@@ -174,6 +176,61 @@ describe("buildResidency", () => {
     expect(r.dedicatedBytes).toBe(0);
     expect(r.sharedBytes).toBe(0);
     expect(r.elsewhereBytes).toBe(118379692032);
+  });
+});
+
+describe("formatAdapterName", () => {
+  it("strips vendor sub-brands, trademark marks and generic suffixes", () => {
+    expect(formatAdapterName("AMD Radeon(TM) 8060S Graphics")).toBe("AMD 8060S");
+    expect(formatAdapterName("NVIDIA GeForce RTX 4090")).toBe("NVIDIA RTX 4090");
+    expect(formatAdapterName("Intel(R) Arc(TM) A770 Graphics")).toBe("Intel Arc A770");
+    expect(formatAdapterName("AMD Radeon\u2122 890M Graphics")).toBe("AMD 890M");
+  });
+
+  it("keeps the original when the name is entirely generic", () => {
+    // Otherwise these would render as an empty label.
+    expect(formatAdapterName("Video Controller")).toBe("Video Controller");
+    expect(formatAdapterName("Microsoft Basic Render Driver")).toBe("Microsoft Basic Render Driver");
+  });
+
+  it("handles blank input", () => {
+    expect(formatAdapterName("")).toBe("");
+    expect(formatAdapterName("   ")).toBe("");
+  });
+});
+
+describe("findDxgiAdapter", () => {
+  const entry = (luidKey: string, name: string, isSoftware = false): DxgiAdapterBudget => ({
+    luidKey,
+    name,
+    isSoftware,
+    dedicatedVideoMemoryBytes: null,
+    sharedSystemMemoryBytes: null,
+    localBudgetBytes: null,
+    nonLocalBudgetBytes: null,
+  });
+  const budgets = new Map<string, DxgiAdapterBudget>([
+    ["luid_0x00000000_0x0ad3b744_phys_0", entry("luid_0x00000000_0x0ad3b744_phys_0", "AMD Radeon(TM) 8060S Graphics")],
+    ["luid_0x00000000_0x00017767_phys_0", entry("luid_0x00000000_0x00017767_phys_0", "Microsoft Basic Render Driver", true)],
+  ]);
+
+  it("matches an adapter key directly", () => {
+    expect(findDxgiAdapter(budgets, "luid_0x00000000_0x0ad3b744_phys_0")?.name).toContain("8060S");
+  });
+
+  it("matches the same LUID on a different physical node", () => {
+    // DXGI only ever reports _phys_0, so a counter instance on another node
+    // must still resolve or a real GPU would be treated as virtual.
+    expect(findDxgiAdapter(budgets, "luid_0x00000000_0x0ad3b744_phys_1")?.name).toContain("8060S");
+  });
+
+  it("returns undefined for an adapter that never enumerates in DXGI", () => {
+    // The Remote Display Adapter reports memory counters but no DXGI entry.
+    expect(findDxgiAdapter(budgets, "luid_0x00000000_0x0ae33796_phys_0")).toBeUndefined();
+  });
+
+  it("still resolves software adapters so callers can filter on the flag", () => {
+    expect(findDxgiAdapter(budgets, "luid_0x00000000_0x00017767_phys_0")?.isSoftware).toBe(true);
   });
 });
 

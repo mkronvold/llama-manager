@@ -572,6 +572,48 @@ while ($true) {
   return result;
 }
 
+// Vendor sub-brands and generic suffixes that add no information once the
+// vendor and model number are shown ("AMD Radeon(TM) 8060S Graphics" is just
+// "AMD 8060S" in a width-constrained label column).
+const ADAPTER_NAME_NOISE = /\b(?:graphics|series|family|adapter|compatible|radeon|geforce)\b/gi;
+
+/** Shortens a DXGI adapter description for display in the System tab. */
+export function formatAdapterName(raw: string): string {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return "";
+  const shortened = trimmed
+    .replace(/\((?:tm|r|c)\)/gi, " ")
+    .replace(/[\u2122\u00ae\u00a9]/g, " ")
+    .replace(ADAPTER_NAME_NOISE, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  // Some adapters are named entirely from the noise list (e.g. a bare
+  // "Video Controller"); keep the original rather than rendering nothing.
+  return shortened || trimmed;
+}
+
+/**
+ * Looks up the DXGI entry for a counter adapter key.
+ *
+ * The DXGI enumeration always reports `_phys_0`, but counter instances can
+ * carry a different physical-node suffix for the same LUID, so a direct key
+ * match is not sufficient. Falling back to the LUID alone keeps real adapters
+ * identifiable (and therefore visible) on multi-node systems.
+ */
+export function findDxgiAdapter(
+  budgets: Map<string, DxgiAdapterBudget>,
+  adapterKey: string,
+): DxgiAdapterBudget | undefined {
+  const direct = budgets.get(adapterKey);
+  if (direct) return direct;
+  const base = adapterKey.replace(/_phys_\d+$/i, "");
+  if (base === adapterKey) return undefined;
+  for (const [key, value] of budgets) {
+    if (key.replace(/_phys_\d+$/i, "") === base) return value;
+  }
+  return undefined;
+}
+
 // Resolves an adapter's memory capacity, preferring the perf-counter Limit
 // value when present and otherwise falling back to a DXGI Budget figure
 // (never used for software/basic-render adapters).
@@ -749,12 +791,26 @@ foreach ($key in $buckets.Keys) {
       return { ...emptyPayload("Windows counters: no GPU adapters reported"), residency, pressure };
     }
 
-    const gpus: GpuSnapshot[] = Array.from(adapterKeys).map((key, i) => {
-      const dxgi = dxgiBudgets.get(key);
+    // Only adapters that enumerate through DXGI as hardware are real GPUs.
+    // This drops the WARP/"Microsoft Basic Render Driver" software adapter
+    // (flagged by DXGI) and indirect-display devices such as the Remote
+    // Display Adapter, which register memory counters but never enumerate in
+    // DXGI at all. Both otherwise show up as permanently-idle 0% rows.
+    const isRealGpu = (key: string): boolean => {
+      const dxgi = findDxgiAdapter(dxgiBudgets, key);
+      return dxgi !== undefined && !dxgi.isSoftware;
+    };
+    const realKeys = Array.from(adapterKeys).filter(isRealGpu);
+    // If DXGI is unavailable (or matched nothing), fall back to showing every
+    // adapter rather than rendering an empty GPU section.
+    const visibleKeys = realKeys.length > 0 ? realKeys : Array.from(adapterKeys);
+
+    const gpus: GpuSnapshot[] = visibleKeys.map((key, i) => {
+      const dxgi = findDxgiAdapter(dxgiBudgets, key);
       const dedicatedTotalBytes = resolveAdapterTotalBytes(dedicatedLimitByLuid.get(key), dxgi, "local");
       const sharedTotalBytes = resolveAdapterTotalBytes(sharedLimitByLuid.get(key), dxgi, "nonLocal");
       return {
-        label: `GPU ${i + 1}`,
+        label: formatAdapterName(dxgi?.name || "") || `GPU ${i + 1}`,
         source: "Windows counters",
         utilizationPercent: utilByLuid.has(key) ? Math.min(100, utilByLuid.get(key)!) : null,
         dedicatedUsedBytes: dedicatedUsedByLuid.get(key) ?? null,
@@ -765,7 +821,11 @@ foreach ($key in $buckets.Keys) {
     });
 
     gpus.sort((a, b) => (b.dedicatedTotalBytes || 0) - (a.dedicatedTotalBytes || 0));
-    gpus.forEach((g, i) => { g.label = `GPU ${i + 1}`; });
+    // Only unnamed adapters need positional labels; renumber them after the
+    // sort so the fallback names stay in displayed order.
+    gpus.forEach((g, i) => {
+      if (/^GPU \d+$/.test(g.label)) g.label = `GPU ${i + 1}`;
+    });
 
     return { gpus, error: null, sharedGpuRamBytes, residency, pressure };
   };
