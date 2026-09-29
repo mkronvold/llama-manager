@@ -5,6 +5,8 @@ import {
   resetCpuSampler,
   cpuPercentBetween,
   smoothCpuPercent,
+  parseMemoryPressure,
+  buildResidency,
   parseNvidiaSmiCsv,
   parseAmdSmiJson,
   parseVulkanProbeOutput,
@@ -92,6 +94,86 @@ describe("sumByLuid (GPU perf-counter aggregation)", () => {
   it("ignores malformed lines instead of throwing", () => {
     const totals = sumByLuid(["not a valid line", "", "luid_0x1_0x2_phys_0,abc"]);
     expect(totals.size).toBe(0);
+  });
+});
+
+describe("parseMemoryPressure", () => {
+  const lines = [
+    "committed bytes,147224330240",
+    "commit limit,156103510528",
+    "page reads/sec,3.93376600169958",
+  ];
+
+  it("parses commit charge and derives available commit", () => {
+    const p = parseMemoryPressure(lines)!;
+    expect(p.committedBytes).toBe(147224330240);
+    expect(p.commitLimitBytes).toBe(156103510528);
+    expect(p.availableCommitBytes).toBe(156103510528 - 147224330240);
+    expect(p.pageReadsPerSec).toBeCloseTo(3.93, 2);
+  });
+
+  it("treats a missing page-read counter as unknown rather than zero", () => {
+    const p = parseMemoryPressure(lines.slice(0, 2))!;
+    expect(p.pageReadsPerSec).toBeNull();
+  });
+
+  it("returns null when commit counters are missing or unusable", () => {
+    expect(parseMemoryPressure([])).toBeNull();
+    expect(parseMemoryPressure(["committed bytes,123"])).toBeNull();
+    expect(parseMemoryPressure(["committed bytes,123", "commit limit,0"])).toBeNull();
+  });
+
+  it("never reports negative headroom when commit exceeds the limit", () => {
+    const p = parseMemoryPressure(["committed bytes,200", "commit limit,100"])!;
+    expect(p.availableCommitBytes).toBe(0);
+  });
+});
+
+describe("buildResidency", () => {
+  const proc = ["private,118379692032", "workingset,31315197952"];
+  const ded = ["pid_18368_luid_0x00000000_0x0ad3b744_phys_0,67139952640"];
+  const shr = ["pid_18368_luid_0x00000000_0x0ad3b744_phys_0,12831981568"];
+
+  it("splits committed bytes across VRAM, shared RAM and the derived remainder", () => {
+    const r = buildResidency(18368, proc, ded, shr)!;
+    expect(r.pid).toBe(18368);
+    expect(r.committedBytes).toBe(118379692032);
+    expect(r.dedicatedBytes).toBe(67139952640);
+    expect(r.sharedBytes).toBe(12831981568);
+    expect(r.workingSetBytes).toBe(31315197952);
+    // The three buckets must account for exactly the committed total.
+    expect(r.dedicatedBytes + r.sharedBytes + r.elsewhereBytes).toBe(r.committedBytes);
+  });
+
+  it("sums per-adapter rows when a process allocates on multiple GPUs", () => {
+    const r = buildResidency(
+      18368,
+      proc,
+      ["pid_18368_luid_0x0_0x1_phys_0,100", "pid_18368_luid_0x0_0x2_phys_0,250"],
+      [],
+    )!;
+    expect(r.dedicatedBytes).toBe(350);
+  });
+
+  it("clamps the derived remainder instead of going negative", () => {
+    // GPU counters and the process snapshot are sampled a moment apart, so the
+    // GPU figures can briefly exceed the recorded private bytes.
+    const r = buildResidency(1, ["private,100"], ["pid_1_luid_0x0_0x1_phys_0,90"], ["pid_1_luid_0x0_0x1_phys_0,90"])!;
+    expect(r.elsewhereBytes).toBe(0);
+  });
+
+  it("returns null without a usable pid or private-bytes reading", () => {
+    expect(buildResidency(null, proc, ded, shr)).toBeNull();
+    expect(buildResidency(0, proc, ded, shr)).toBeNull();
+    expect(buildResidency(18368, [], ded, shr)).toBeNull();
+    expect(buildResidency(18368, ["private,0"], ded, shr)).toBeNull();
+  });
+
+  it("reports zeroed GPU buckets when the process holds no GPU memory", () => {
+    const r = buildResidency(18368, proc, [], [])!;
+    expect(r.dedicatedBytes).toBe(0);
+    expect(r.sharedBytes).toBe(0);
+    expect(r.elsewhereBytes).toBe(118379692032);
   });
 });
 

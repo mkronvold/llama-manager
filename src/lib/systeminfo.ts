@@ -36,10 +36,63 @@ export interface SystemSnapshot {
   cpuPercent: number | null;
   ramUsedBytes: number;
   ramTotalBytes: number;
+  /**
+   * Portion of ramUsedBytes that the GPU driver has locked as "shared" VRAM.
+   * Shared VRAM is not extra memory - it is a window into the same system RAM,
+   * so it must never be added to a systemwide total (which is exactly what
+   * Task Manager's "GPU Memory" figure does).
+   */
+  sharedGpuRamBytes: number | null;
+  /** RAM + dedicated VRAM carve-out, i.e. real installed memory. */
+  systemwideUsedBytes: number | null;
+  systemwideTotalBytes: number | null;
+  /** Where the running server's committed memory actually landed. */
+  residency: ProcessMemoryResidency | null;
+  /** Commit charge and paging health. */
+  pressure: MemoryPressure | null;
   gpuSources: GpuTelemetrySourceSnapshot[];
   gpus: GpuSnapshot[];
   /** Set when GPU stats couldn't be collected at all (e.g. no source available). */
   gpuError: string | null;
+}
+
+/**
+ * Breakdown of where a process's committed memory physically resides. On a
+ * unified-memory APU the model rarely fits in the VRAM carve-out alone, so this
+ * answers "the model is N GB but dedicated+shared don't add up - where did the
+ * rest go?".
+ */
+export interface ProcessMemoryResidency {
+  pid: number;
+  /** Private (committed) bytes: GPU allocations plus host-side KV cache/buffers. */
+  committedBytes: number;
+  /** Committed bytes resident in the dedicated VRAM carve-out. */
+  dedicatedBytes: number;
+  /** Committed bytes resident in system RAM via the GPU's shared aperture. */
+  sharedBytes: number;
+  /**
+   * Derived remainder (committed - dedicated - shared): committed memory that
+   * is not in GPU-visible memory, i.e. sitting in the compression store, the
+   * pagefile, or plain host RAM. Derived rather than measured, because Windows
+   * exposes no per-process split of those destinations.
+   */
+  elsewhereBytes: number;
+  /** Resident set size, for reference. */
+  workingSetBytes: number;
+}
+
+/**
+ * Commit charge vs. limit, plus the paging rate. These answer two different
+ * questions: available commit predicts whether the *next* model will load at
+ * all, while the page-read rate is the only reliable signal that the *running*
+ * model is actually being slowed by memory pressure.
+ */
+export interface MemoryPressure {
+  committedBytes: number;
+  commitLimitBytes: number;
+  availableCommitBytes: number;
+  /** Hard page reads/sec; near zero means evicted pages are cold, not hot. */
+  pageReadsPerSec: number | null;
 }
 
 export const DEFAULT_GPU_TELEMETRY: GpuTelemetrySettings = {
@@ -291,6 +344,79 @@ export function sumByLuid(lines: string[]): Map<string, number> {
   return totals;
 }
 
+function sumValues(totals: Map<string, number>): number | null {
+  if (totals.size === 0) return null;
+  let sum = 0;
+  for (const value of totals.values()) sum += value;
+  return sum;
+}
+
+/** Parses "<counter leaf name>,<value>" lines from the \Memory\* counter set. */
+export function parseMemoryPressure(lines: string[]): MemoryPressure | null {
+  let committedBytes: number | null = null;
+  let commitLimitBytes: number | null = null;
+  let pageReadsPerSec: number | null = null;
+
+  for (const line of lines) {
+    const idx = line.lastIndexOf(",");
+    if (idx === -1) continue;
+    const name = line.slice(0, idx).trim().toLowerCase();
+    const value = parseFloat(line.slice(idx + 1).trim());
+    if (!Number.isFinite(value)) continue;
+    if (name.includes("committed bytes")) committedBytes = value;
+    else if (name.includes("commit limit")) commitLimitBytes = value;
+    else if (name.includes("page reads")) pageReadsPerSec = value;
+  }
+
+  if (committedBytes === null || commitLimitBytes === null || commitLimitBytes <= 0) return null;
+  return {
+    committedBytes,
+    commitLimitBytes,
+    availableCommitBytes: Math.max(0, commitLimitBytes - committedBytes),
+    pageReadsPerSec,
+  };
+}
+
+/**
+ * Combines the target process's private/working-set bytes with its per-process
+ * GPU memory counters into a residency breakdown.
+ */
+export function buildResidency(
+  pid: number | null,
+  procLines: string[],
+  dedicatedLines: string[],
+  sharedLines: string[],
+): ProcessMemoryResidency | null {
+  if (!pid || pid <= 0) return null;
+
+  let committedBytes: number | null = null;
+  let workingSetBytes = 0;
+  for (const line of procLines) {
+    const idx = line.lastIndexOf(",");
+    if (idx === -1) continue;
+    const name = line.slice(0, idx).trim().toLowerCase();
+    const value = parseFloat(line.slice(idx + 1).trim());
+    if (!Number.isFinite(value)) continue;
+    if (name === "private") committedBytes = value;
+    else if (name === "workingset") workingSetBytes = value;
+  }
+  if (committedBytes === null || committedBytes <= 0) return null;
+
+  // A process can hold allocations on more than one adapter, so sum across all
+  // of its per-adapter instances.
+  const dedicatedBytes = sumValues(sumByLuid(dedicatedLines)) ?? 0;
+  const sharedBytes = sumValues(sumByLuid(sharedLines)) ?? 0;
+
+  return {
+    pid,
+    committedBytes,
+    dedicatedBytes,
+    sharedBytes,
+    elsewhereBytes: Math.max(0, committedBytes - dedicatedBytes - sharedBytes),
+    workingSetBytes,
+  };
+}
+
 export interface DxgiAdapterBudget {
   luidKey: string;
   name: string;
@@ -468,42 +594,84 @@ export function resolveAdapterTotalBytes(
 }
 
 // Enumerating '\GPU Engine(*)' can take several seconds on machines with many
-// cores/processes (measured 3.0-3.6s for the combined query on a 32-core APU),
+// cores/processes (measured ~2.0s for the combined query on a 32-core APU),
 // and a timeout here silently demotes the System tab to a less accurate
 // fallback source, so this is deliberately generous.
 const GPU_COUNTER_TIMEOUT_MS = 15000;
 
-async function getWindowsCounterGpuSnapshots(): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {  if (os.platform() !== "win32") {
-    return { gpus: [], error: "Windows performance counters are only available on Windows" };
+interface WindowsCountersPayload {
+  gpus: GpuSnapshot[];
+  error: string | null;
+  sharedGpuRamBytes: number | null;
+  residency: ProcessMemoryResidency | null;
+  pressure: MemoryPressure | null;
+}
+
+function emptyPayload(error: string | null): WindowsCountersPayload {
+  return { gpus: [], error, sharedGpuRamBytes: null, residency: null, pressure: null };
+}
+
+async function getWindowsCounterGpuSnapshots(serverPid?: number | null): Promise<WindowsCountersPayload> {
+  if (os.platform() !== "win32") {
+    return emptyPayload("Windows performance counters are only available on Windows");
   }
 
   // A single powershell invocation gathers all counter sets to avoid paying
   // process-spawn overhead per refresh, and issues them as one combined
-  // Get-Counter query: querying the five paths separately measured 5.1-5.4s on
-  // a 32-core APU, which exceeded the caller's timeout and silently demoted the
-  // System tab to a fallback source. One combined query measures ~3.0-3.6s.
+  // Get-Counter query: querying the paths separately measured 5.1-5.4s on a
+  // 32-core APU, which exceeded the caller's timeout and silently demoted the
+  // System tab to a fallback source. One combined query measures ~2.0s even
+  // with the extra memory/process counters folded in.
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
+$targetPid = ${Math.max(0, Math.floor(serverPid ?? 0))}
 $paths = @(
   '\\GPU Engine(*)\\Utilization Percentage',
   '\\GPU Adapter Memory(*)\\Dedicated Usage',
   '\\GPU Adapter Memory(*)\\Dedicated Usage Limit',
   '\\GPU Adapter Memory(*)\\Shared Usage',
-  '\\GPU Adapter Memory(*)\\Shared Usage Limit'
+  '\\GPU Adapter Memory(*)\\Shared Usage Limit',
+  '\\GPU Process Memory(*)\\Dedicated Usage',
+  '\\GPU Process Memory(*)\\Shared Usage',
+  '\\Memory\\Committed Bytes',
+  '\\Memory\\Commit Limit',
+  '\\Memory\\Page Reads/sec'
 )
-$buckets = [ordered]@{ UTIL = @(); DEDICATED_USED = @(); DEDICATED_LIMIT = @(); SHARED_USED = @(); SHARED_LIMIT = @() }
+$buckets = [ordered]@{
+  UTIL = @(); DEDICATED_USED = @(); DEDICATED_LIMIT = @(); SHARED_USED = @(); SHARED_LIMIT = @()
+  PROC_DEDICATED = @(); PROC_SHARED = @(); MEM = @(); PROC = @()
+}
 function Classify($samplePath) {
+  # 'GPU Process Memory' and 'GPU Adapter Memory' share leaf counter names, so
+  # the per-process set must be matched before the per-adapter suffixes.
   if ($samplePath -like '*\\utilization percentage') { return 'UTIL' }
+  if ($samplePath -like '*gpu process memory*') {
+    if ($samplePath -like '*\\dedicated usage') { return 'PROC_DEDICATED' }
+    if ($samplePath -like '*\\shared usage') { return 'PROC_SHARED' }
+    return $null
+  }
   if ($samplePath -like '*\\dedicated usage limit') { return 'DEDICATED_LIMIT' }
   if ($samplePath -like '*\\dedicated usage') { return 'DEDICATED_USED' }
   if ($samplePath -like '*\\shared usage limit') { return 'SHARED_LIMIT' }
   if ($samplePath -like '*\\shared usage') { return 'SHARED_USED' }
+  if ($samplePath -like '*\\committed bytes') { return 'MEM' }
+  if ($samplePath -like '*\\commit limit') { return 'MEM' }
+  if ($samplePath -like '*\\page reads/sec') { return 'MEM' }
   return $null
 }
 function Collect($samples) {
   foreach ($s in $samples) {
     $key = Classify $s.Path
-    if ($key) { $buckets[$key] += "$($s.InstanceName),$($s.CookedValue)" }
+    if (-not $key) { continue }
+    if ($key -eq 'MEM') {
+      $buckets[$key] += "$($s.Path -replace '.*\\\\',''),$($s.CookedValue)"
+    } elseif ($key -eq 'PROC_DEDICATED' -or $key -eq 'PROC_SHARED') {
+      if ($targetPid -gt 0 -and $s.InstanceName -like "pid_$($targetPid)_*") {
+        $buckets[$key] += "$($s.InstanceName),$($s.CookedValue)"
+      }
+    } else {
+      $buckets[$key] += "$($s.InstanceName),$($s.CookedValue)"
+    }
   }
 }
 Collect (Get-Counter -Counter $paths -ErrorAction SilentlyContinue).CounterSamples
@@ -514,23 +682,31 @@ if ((($buckets.Values | ForEach-Object { $_.Count }) | Measure-Object -Sum).Sum 
     Collect (Get-Counter -Counter $p -ErrorAction SilentlyContinue).CounterSamples
   }
 }
+if ($targetPid -gt 0) {
+  $proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+  if ($proc) {
+    $buckets['PROC'] += "private,$($proc.PrivateMemorySize64)"
+    $buckets['PROC'] += "workingset,$($proc.WorkingSet64)"
+  }
+}
 foreach ($key in $buckets.Keys) {
   "---$key---"
   $buckets[$key]
 }
 `;
 
-  const queryOnce = async (): Promise<{ gpus: GpuSnapshot[]; error: string | null }> => {
+  const queryOnce = async (): Promise<WindowsCountersPayload> => {
     const [output, dxgiBudgets] = await Promise.all([
       runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], GPU_COUNTER_TIMEOUT_MS),
       getDxgiAdapterBudgets(),
     ]);
     if (!output) {
-      return { gpus: [], error: "Windows counters: could not read GPU performance counters" };
+      return emptyPayload("Windows counters: could not read GPU performance counters");
     }
 
     const sections: Record<string, string[]> = {
       UTIL: [], DEDICATED_USED: [], DEDICATED_LIMIT: [], SHARED_USED: [], SHARED_LIMIT: [],
+      PROC_DEDICATED: [], PROC_SHARED: [], MEM: [], PROC: [],
     };
     let current: string | null = null;
     for (const rawLine of output.split(/\r?\n/)) {
@@ -550,6 +726,15 @@ foreach ($key in $buckets.Keys) {
     const sharedUsedByLuid = sumByLuid(sections.SHARED_USED!);
     const sharedLimitByLuid = sumByLuid(sections.SHARED_LIMIT!);
 
+    const pressure = parseMemoryPressure(sections.MEM!);
+    const residency = buildResidency(
+      serverPid ?? null,
+      sections.PROC!,
+      sections.PROC_DEDICATED!,
+      sections.PROC_SHARED!,
+    );
+    const sharedGpuRamBytes = sumValues(sharedUsedByLuid);
+
     // Some drivers (observed with unified-memory AMD APUs) only register the
     // Usage counters and never register the Usage Limit counters, so adapter
     // detection must not require a Limit counter to be present.
@@ -561,7 +746,7 @@ foreach ($key in $buckets.Keys) {
       ...sharedLimitByLuid.keys(),
     ]);
     if (adapterKeys.size === 0) {
-      return { gpus: [], error: "Windows counters: no GPU adapters reported" };
+      return { ...emptyPayload("Windows counters: no GPU adapters reported"), residency, pressure };
     }
 
     const gpus: GpuSnapshot[] = Array.from(adapterKeys).map((key, i) => {
@@ -582,7 +767,7 @@ foreach ($key in $buckets.Keys) {
     gpus.sort((a, b) => (b.dedicatedTotalBytes || 0) - (a.dedicatedTotalBytes || 0));
     gpus.forEach((g, i) => { g.label = `GPU ${i + 1}`; });
 
-    return { gpus, error: null };
+    return { gpus, error: null, sharedGpuRamBytes, residency, pressure };
   };
 
   const first = await queryOnce();
@@ -898,16 +1083,33 @@ function sourceResult(id: string, label: string, result: { gpus: GpuSnapshot[]; 
  *  3. AMD amd-smi (gated on Windows)
  *  4. Vulkan ggml runtime memory probe
  */
-export async function getGpuTelemetrySources(config?: ConfigData | null): Promise<GpuTelemetrySourceSnapshot[]> {
+export async function getGpuTelemetrySources(config?: ConfigData | null, serverPid?: number | null): Promise<GpuTelemetrySourceSnapshot[]> {
+  return (await collectTelemetry(config, serverPid)).sources;
+}
+
+/**
+ * Runs the source cascade once and returns both the per-source GPU snapshots
+ * and the memory/residency detail that the Windows counter query collects in
+ * the same invocation (so the System tab never pays for a second query).
+ */
+async function collectTelemetry(
+  config?: ConfigData | null,
+  serverPid?: number | null,
+): Promise<{ sources: GpuTelemetrySourceSnapshot[]; windows: WindowsCountersPayload | null }> {
   const settings = telemetrySettings(config);
   if (settings.mode === "disabled") {
-    return [sourceResult("disabled", "Disabled", { gpus: [], error: "GPU telemetry is disabled in Options" })];
+    return {
+      sources: [sourceResult("disabled", "Disabled", { gpus: [], error: "GPU telemetry is disabled in Options" })],
+      windows: null,
+    };
   }
 
   const sources: GpuTelemetrySourceSnapshot[] = [];
+  let windows: WindowsCountersPayload | null = null;
 
   if (settings.mode === "auto" || settings.mode === "windows") {
-    sources.push(sourceResult("windows", "Windows counters", await getWindowsCounterGpuSnapshots()));
+    windows = await getWindowsCounterGpuSnapshots(serverPid);
+    sources.push(sourceResult("windows", "Windows counters", windows));
   }
 
   if (settings.mode === "auto" || settings.mode === "vendor") {
@@ -919,7 +1121,10 @@ export async function getGpuTelemetrySources(config?: ConfigData | null): Promis
     sources.push(sourceResult("vulkan", "Vulkan (ggml)", await getVulkanGpuSnapshots(config)));
   }
 
-  return sources.length > 0 ? sources : [sourceResult("none", "None", { gpus: [], error: "No GPU telemetry sources available" })];
+  if (sources.length === 0) {
+    sources.push(sourceResult("none", "None", { gpus: [], error: "No GPU telemetry sources available" }));
+  }
+  return { sources, windows };
 }
 
 export async function getGpuSnapshots(config?: ConfigData | null): Promise<{ gpus: GpuSnapshot[]; error: string | null }> {
@@ -932,20 +1137,41 @@ export async function getGpuSnapshots(config?: ConfigData | null): Promise<{ gpu
   };
 }
 
-export async function getSystemSnapshot(config?: ConfigData | null): Promise<SystemSnapshot> {
-  const [cpuPercent, gpuResult] = await Promise.all([
+export async function getSystemSnapshot(config?: ConfigData | null, serverPid?: number | null): Promise<SystemSnapshot> {
+  const [cpuPercent, telemetry] = await Promise.all([
     sampleCpuPercent(),
-    getGpuTelemetrySources(config),
+    collectTelemetry(config, serverPid),
   ]);
+  const gpuResult = telemetry.sources;
   const { usedBytes, totalBytes } = getMemoryInfo();
   const firstAvailable = gpuResult.find((source) => source.gpus.length > 0);
+  const gpus = firstAvailable?.gpus || [];
+
+  // Real installed memory is RAM plus the firmware VRAM carve-out, which
+  // Windows never sees. Shared VRAM is deliberately excluded: it is an aperture
+  // onto RAM that is already counted in ramUsedBytes, so including it would
+  // double-count (the mistake behind Task Manager's "GPU Memory" total).
+  let dedicatedUsed = 0;
+  let dedicatedTotal = 0;
+  for (const gpu of gpus) {
+    if (gpu.dedicatedTotalBytes && gpu.dedicatedTotalBytes > 0) {
+      dedicatedTotal += gpu.dedicatedTotalBytes;
+      dedicatedUsed += gpu.dedicatedUsedBytes ?? 0;
+    }
+  }
+  const hasDedicated = dedicatedTotal > 0;
 
   return {
     cpuPercent,
     ramUsedBytes: usedBytes,
     ramTotalBytes: totalBytes,
+    sharedGpuRamBytes: telemetry.windows?.sharedGpuRamBytes ?? null,
+    systemwideUsedBytes: hasDedicated ? usedBytes + dedicatedUsed : null,
+    systemwideTotalBytes: hasDedicated ? totalBytes + dedicatedTotal : null,
+    residency: telemetry.windows?.residency ?? null,
+    pressure: telemetry.windows?.pressure ?? null,
     gpuSources: gpuResult,
-    gpus: firstAvailable?.gpus || [],
+    gpus,
     gpuError: firstAvailable ? null : gpuResult.map((source) => source.error).filter(Boolean).join(" | "),
   };
 }

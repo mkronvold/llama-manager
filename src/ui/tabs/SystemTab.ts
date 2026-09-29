@@ -4,6 +4,7 @@ import { Section } from "../../framework/widgets/Section";
 import { fg, fgBg } from "../../lib/theme";
 import { formatSize } from "../../lib/utils";
 import { getSystemSnapshot } from "../../lib/systeminfo";
+import { getStatus } from "../../lib/server";
 import type { GpuTelemetrySourceSnapshot, SystemSnapshot } from "../../lib/systeminfo";
 import type { Color } from "../../lib/theme";
 import type { TabContext } from "../../lib/tabcontext";
@@ -81,14 +82,35 @@ class SystemPanel extends Control {
   }
 
   protected contentHeight(): number {
-    // CPU (1) + RAM (1) + gap (1) + per-GPU (util + dedicated + shared, +1 gap between) or error/loading lines
+    // CPU (1) + RAM (1) + optional shared sub-line + gap (1) + per-GPU
+    // (util + dedicated + shared, +1 gap between) or error/loading lines,
+    // then the optional systemwide/residency/pressure blocks.
     if (!this._snapshot) return 3;
     const source = this.activeSource();
     const gpus = source?.gpus || [];
     const gpuLines = gpus.length > 0
       ? gpus.length * 3 + (gpus.length - 1)
       : this.gpuErrorLines(source?.error || this._snapshot.gpuError).length;
-    return 1 + 1 + 1 + gpuLines;
+    return 1 + 1 + this.sharedSubLines() + 1 + gpuLines + this.detailLines();
+  }
+
+  /** The "of which GPU" sub-line under RAM, shown only when shared VRAM is in use. */
+  protected sharedSubLines(): number {
+    const shared = this._snapshot?.sharedGpuRamBytes;
+    return shared !== null && shared !== undefined && shared > 0 ? 1 : 0;
+  }
+
+  protected detailLines(): number {
+    const snap = this._snapshot;
+    if (!snap) return 0;
+    let lines = 0;
+    // Systemwide total (blank + line)
+    if (snap.systemwideTotalBytes) lines += 2;
+    // Model residency: blank + heading + 3 bars
+    if (snap.residency) lines += 5;
+    // Memory pressure: blank + commit bar + available + paging
+    if (snap.pressure) lines += 4;
+    return lines;
   }
 
   protected gpuErrorLines(error: string | null): string[] {
@@ -110,7 +132,10 @@ class SystemPanel extends Control {
   }
 
   protected refresh(): void {
-    getSystemSnapshot(this._ctx?.getConfig()).then((snapshot) => {
+    // The residency breakdown is per-process, so the running server's PID is
+    // passed down and folded into the same counter query.
+    const serverPid = getStatus().pid;
+    getSystemSnapshot(this._ctx?.getConfig(), serverPid).then((snapshot) => {
       if (this._destroyed) return;
       this._snapshot = snapshot;
       const count = this.displaySourceCount();
@@ -161,6 +186,17 @@ class SystemPanel extends Control {
     canvas.moveTo(x + labelWidth + BAR_WIDTH + 1, cy);
     fg(canvas, "text", `${formatSize(snap.ramUsedBytes)} / ${formatSize(snap.ramTotalBytes)}`);
     cy++;
+
+    // Shared VRAM is an aperture onto this same RAM rather than extra memory,
+    // so it is surfaced as a share of the RAM figure instead of being
+    // subtracted from it (which would disagree with Task Manager).
+    if (snap.sharedGpuRamBytes !== null && snap.sharedGpuRamBytes > 0) {
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "  of which GPU".padEnd(labelWidth));
+      fg(canvas, "text", formatSize(snap.sharedGpuRamBytes));
+      fg(canvas, "textMuted", "  shared VRAM is RAM, not extra");
+      cy++;
+    }
     cy++;
 
     if (gpus.length === 0) {
@@ -169,6 +205,7 @@ class SystemPanel extends Control {
         fg(canvas, "textMuted", line.padEnd(this.rect.width).slice(0, this.rect.width));
         cy++;
       }
+      this.drawDetails(ctx, cy, labelWidth);
       return;
     }
 
@@ -221,6 +258,89 @@ class SystemPanel extends Control {
 
       if (i < gpus.length - 1) cy++;
     }
+
+    cy = this.drawDetails(ctx, cy, labelWidth);
+  }
+
+  /** Draws the systemwide total, model residency and memory pressure blocks. */
+  protected drawDetails(ctx: RenderContext, startY: number, labelWidth: number): number {
+    const { canvas } = ctx;
+    const { x } = this.rect;
+    const snap = this._snapshot;
+    let cy = startY;
+    if (!snap) return cy;
+
+    if (snap.systemwideTotalBytes && snap.systemwideUsedBytes !== null) {
+      cy++;
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "Systemwide".padEnd(labelWidth));
+      fg(canvas, "text", `${formatSize(snap.systemwideUsedBytes)} / ${formatSize(snap.systemwideTotalBytes)}`);
+      fg(canvas, "textMuted", "  RAM + dedicated VRAM carve-out");
+      cy++;
+    }
+
+    const res = snap.residency;
+    if (res) {
+      const total = res.committedBytes || 1;
+      const pct = (bytes: number) => `${Math.round((bytes / total) * 100)}%`;
+      cy++;
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "Model residency".padEnd(labelWidth));
+      fg(canvas, "text", formatSize(res.committedBytes));
+      fg(canvas, "textMuted", `  committed by PID ${res.pid}`);
+      cy++;
+
+      const drawPart = (label: string, bytes: number, color: Color) => {
+        canvas.moveTo(x, cy);
+        fg(canvas, "textMuted", label.padEnd(labelWidth));
+        drawBar(canvas, x + labelWidth, cy, BAR_WIDTH, bytes / total, color);
+        canvas.moveTo(x + labelWidth + BAR_WIDTH + 1, cy);
+        fg(canvas, "text", formatSize(bytes));
+        fg(canvas, "textMuted", `  ${pct(bytes)}`);
+        cy++;
+      };
+      drawPart("  Dedicated VRAM", res.dedicatedBytes, "success");
+      drawPart("  Shared (RAM)", res.sharedBytes, "success");
+      // Always amber: this is a "where did it go" proportion, not a budget, so
+      // the usual >75%/>90% thresholds would be misleading.
+      drawPart("  Elsewhere", res.elsewhereBytes, "warning");
+    }
+
+    const pressure = snap.pressure;
+    if (pressure) {
+      const ratio = pressure.committedBytes / pressure.commitLimitBytes;
+      cy++;
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "Commit charge".padEnd(labelWidth));
+      drawBar(canvas, x + labelWidth, cy, BAR_WIDTH, ratio, barColorFor(ratio));
+      canvas.moveTo(x + labelWidth + BAR_WIDTH + 1, cy);
+      fg(canvas, "text", `${formatSize(pressure.committedBytes)} / ${formatSize(pressure.commitLimitBytes)}`);
+      fg(canvas, "textMuted", `  ${Math.round(ratio * 100)}%`);
+      cy++;
+
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "Available commit".padEnd(labelWidth));
+      fg(canvas, "text", formatSize(pressure.availableCommitBytes));
+      fg(canvas, "textMuted", "  headroom before a load fails");
+      cy++;
+
+      canvas.moveTo(x, cy);
+      fg(canvas, "textMuted", "Paging".padEnd(labelWidth));
+      if (pressure.pageReadsPerSec === null) {
+        fg(canvas, "textMuted", "n/a");
+      } else {
+        // High commit alone is not a problem - evicted pages that are never
+        // touched again cost nothing. The hard page-read rate is the only
+        // signal that memory pressure is actually slowing the model down.
+        const busy = pressure.pageReadsPerSec >= 50;
+        fg(canvas, busy ? "warning" : "success", busy ? "paging" : "healthy");
+        fg(canvas, "textMuted", `  ${pressure.pageReadsPerSec.toFixed(0)} page reads/s`);
+        if (!busy) fg(canvas, "textMuted", " · evicted pages are cold");
+      }
+      cy++;
+    }
+
+    return cy;
   }
 }
 
