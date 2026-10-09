@@ -3,6 +3,10 @@ import path from "path";
 import os from "os";
 import { getVersionsDir } from "./config";
 import { ConfigData } from "./config";
+import { inspectStrata, unregisterStrataInstallation } from "./strata";
+import { isStrataVersion, strataVersionId, validateStrataInstallations } from "./runtime";
+import type { RuntimeKind } from "./runtime";
+import type { InspectionRunner, StrataInspection } from "./strata";
 import {
   getFork,
   resolveBinaryName,
@@ -41,6 +45,8 @@ export const BACKEND_LABELS: Record<string, string> = {
 };
 
 export interface VersionInfo {
+  runtime?: RuntimeKind;
+  strata?: StrataInspection;
   version: string;
   tag: string;
   backend: string;
@@ -195,11 +201,9 @@ function getBackendLabel(backend: string): string {
   return backend;
 }
 
-export async function listVersions(config: ConfigData): Promise<VersionInfo[]> {
+export async function listVersions(config: ConfigData, inspectionRunner?: InspectionRunner): Promise<VersionInfo[]> {
   const dir = getVersionsDir(config);
-  if (!(await fs.pathExists(dir))) return [];
-
-  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const entries = await fs.pathExists(dir) ? await fs.readdir(dir, { withFileTypes: true }) : [];
   const versions: VersionInfo[] = [];
 
   for (const entry of entries) {
@@ -212,6 +216,7 @@ export async function listVersions(config: ConfigData): Promise<VersionInfo[]> {
       const { tag, backend } = parseFolderNameV2(entry.name);
       const stat = await fs.stat(versionPath);
       versions.push({
+        runtime: "llama-compatible",
         version: entry.name,
         tag,
         backend,
@@ -223,6 +228,21 @@ export async function listVersions(config: ConfigData): Promise<VersionInfo[]> {
     }
   }
 
+  for (const installation of validateStrataInstallations(config.strataInstallations)) {
+    const inspection = await inspectStrata(installation.root, inspectionRunner);
+    versions.push({
+      version: strataVersionId(installation.id),
+      tag: inspection.sourceTag ?? inspection.sourceRevision?.slice(0, 8) ?? "source unknown",
+      backend: inspection.backend ?? "unknown",
+      path: inspection.root,
+      active: false,
+      fork: "strata",
+      runtime: "strata",
+      strata: inspection,
+      createdAt: Date.parse(installation.registeredAt),
+    });
+  }
+
   return versions.sort((a, b) => {
     const tagCmp = b.tag.localeCompare(a.tag);
     if (tagCmp !== 0) return tagCmp;
@@ -231,6 +251,9 @@ export async function listVersions(config: ConfigData): Promise<VersionInfo[]> {
 }
 
 export async function switchVersion(config: ConfigData, version: string): Promise<ConfigData> {
+  if (isStrataVersion(version)) {
+    throw new Error("Strata is registered for inspection only; profile and lifecycle support are not implemented yet");
+  }
   const dir = getVersionsDir(config);
   const versionPath = path.join(dir, version);
   const fork = detectForkFromFolder(version);
@@ -246,6 +269,10 @@ export async function switchVersion(config: ConfigData, version: string): Promis
 }
 
 export async function uninstallVersion(config: ConfigData, version: string): Promise<void> {
+  if (isStrataVersion(version)) {
+    unregisterStrataInstallation(config, version.slice("strata:".length));
+    return;
+  }
   if (version === config.activeVersion) {
     throw new Error("Cannot uninstall active version");
   }

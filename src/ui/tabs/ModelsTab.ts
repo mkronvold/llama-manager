@@ -20,7 +20,7 @@ import {
 } from "../../lib/models";
 import { formatSize } from "../../lib/utils";
 import { browseModels, listFiles, HFRepoInfo, HFFileInfo } from "../../lib/hf";
-import { saveConfig, getModelsDir, ConfigData } from "../../lib/config";
+import { saveConfig, getModelsDir, ConfigData, getActiveProfile, isStrataProfile } from "../../lib/config";
 import { fireAsync, formatDate } from "../../lib/utils";
 import { createDownloadDialog } from "../../framework/widgets/DownloadDialog";
 import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
@@ -29,6 +29,8 @@ import type { TabContext } from "../../lib/tabcontext";
 import type { Size } from "../../framework/types";
 
 type ViewMode = "local" | "search" | "results" | "files";
+
+const STRATA_MODEL_HINT = "Strata model is chosen by Configure";
 
 export class ModelsControl extends Control {
   protected _ctx: TabContext | null = null;
@@ -665,9 +667,10 @@ this._hfResultsList.handleKey = (key: string) => {
           this._downloadAbortController?.signal,
         );
 
-        // Set as mmproj in the active profile
+        // Set as mmproj in the active profile (Strata profiles own their model via Configure)
         const profile = config.server.profiles[config.server.activeProfile];
-        if (profile && profile.presets.model) {
+        const strata = isStrataProfile(profile);
+        if (profile && !strata && profile.presets.model) {
           const mmprojPath = path.join(getModelsDir(config), this._selectedRepo!.id, file.path);
           profile.presets.model.mmproj = mmprojPath;
           await saveConfig(config);
@@ -675,10 +678,10 @@ this._hfResultsList.handleKey = (key: string) => {
         }
 
         this._downloadAbortController = null;
-        handle.update(100, "Downloaded & set as mmproj!");
+        handle.update(100, strata ? "Downloaded" : "Downloaded & set as mmproj!");
         setTimeout(() => handle.close(), 500);
         await handle.promise;
-        this._ctx?.showMessage(`Set mmproj: ${file.path}`);
+        this._ctx?.showMessage(strata ? `Downloaded ${file.path}; ${STRATA_MODEL_HINT}` : `Set mmproj: ${file.path}`);
         this._view = "local";
         this.updateView();
         this.refreshModels();
@@ -725,6 +728,10 @@ this._hfResultsList.handleKey = (key: string) => {
   selectModel(model: LocalModel): void {
     const config = this._ctx?.getConfig();
     if (!config) return;
+    if (isStrataProfile(getActiveProfile(config))) {
+      this._ctx?.showMessage(STRATA_MODEL_HINT);
+      return;
+    }
 
     (async () => {
       let updated: ConfigData;

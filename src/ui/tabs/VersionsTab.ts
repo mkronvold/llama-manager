@@ -27,6 +27,9 @@ import { saveConfig } from "../../lib/config";
 import { fireAsync, formatSize, formatDate } from "../../lib/utils";
 import { createDownloadDialog } from "../../framework/widgets/DownloadDialog";
 import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
+import { createInputDialog } from "../../framework/widgets/InputDialog";
+import { registerStrataInstallation } from "../../lib/strata";
+import { strataUnregisterMessage } from "../../lib/strataprofile";
 import { getInstallableForks, getFork } from "../../lib/forks";
 import type { TabContext } from "../../lib/tabcontext";
 import type { Size, RenderContext } from "../../framework/types";
@@ -41,6 +44,7 @@ interface UpdateCandidate {
 
 class ChangelogView extends Scrollable {
   protected _lines: string[] = [];
+  protected _plainLines: string[] | null = null;
 
   measure(parentSize?: Size): Size {
     return { width: parentSize?.width ?? this.rect.width, height: parentSize?.height ?? this._lines.length };
@@ -48,21 +52,35 @@ class ChangelogView extends Scrollable {
 
   onLayout(): void {
     super.onLayout();
+    this.wrapPlainLines();
     this.setContentHeight(this._lines.length);
   }
 
-  update(body: string): void {
-    this._lines = stripMarkdown(body);
+  update(body: string, plainText = false): void {
+    this._plainLines = plainText ? body.split(/\r?\n/) : null;
+    this._lines = this._plainLines ?? stripMarkdown(body);
+    this.wrapPlainLines();
     this.setContentHeight(this._lines.length);
     this.scrollOffset = 0;
     this.markDirty();
   }
 
   clear(): void {
+    this._plainLines = null;
     this._lines = [];
     this.setContentHeight(0);
     this.scrollOffset = 0;
     this.markDirty();
+  }
+
+  protected wrapPlainLines(): void {
+    if (!this._plainLines) return;
+    const width = Math.max(1, this.contentWidth);
+    this._lines = this._plainLines.flatMap((line) => {
+      const chunks: string[] = [];
+      for (let start = 0; start < line.length; start += width) chunks.push(line.slice(start, start + width));
+      return chunks.length ? chunks : [""];
+    });
   }
 
   draw(ctx: RenderContext): void {
@@ -93,6 +111,7 @@ export class VersionsControl extends Control {
   protected _dividerButtons: Spacer;
   protected _buttonRow: Row;
   protected _btnInstall: Button;
+  protected _btnRegister: Button;
   protected _btnUpdate: Button;
   protected _btnUpdateAll: Button;
   protected _btnDelete: Button;
@@ -122,8 +141,8 @@ export class VersionsControl extends Control {
     this._table.flex = 1;
     this._table.columns = [
       {
-        label: "Tag",
-        width: 10,
+        label: "Tag/Source",
+        width: 14,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
@@ -136,12 +155,20 @@ export class VersionsControl extends Control {
         },
       },
       {
+        label: "Engine",
+        width: 10,
+        align: "left",
+        format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) =>
+          "active" in row && row.runtime === "strata" ? row.strata?.engineVersion ?? "unknown" : "-",
+      },
+      {
         label: "Backend",
         width: 14,
         flex: 1,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
+            if (row.runtime === "strata") return `${BACKEND_LABELS[row.backend] || row.backend} / ${row.strata?.ready ? "inspected" : "incomplete"}`;
             return BACKEND_LABELS[row.backend] || row.backend;
           }
           if ("publishedAt" in row) {
@@ -156,7 +183,7 @@ export class VersionsControl extends Control {
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
-            return getFork(row.fork).label;
+            return row.runtime === "strata" ? "Strata" : getFork(row.fork).label;
           }
           return "-";
         },
@@ -190,6 +217,7 @@ export class VersionsControl extends Control {
     this._changelog.flex = 1;
 
     this._btnInstall = new Button({ label: "Install" });
+    this._btnRegister = new Button({ label: "Register Strata" });
     this._btnUpdate = new Button({ label: "Update" });
     this._btnUpdateAll = new Button({ label: "Update All" });
     this._btnDelete = new Button({ label: "Delete" });
@@ -207,6 +235,7 @@ export class VersionsControl extends Control {
     this._dividerButtons.flex = 1;
     this._buttonRow.add(this._dividerButtons);
     this._buttonRow.add(this._btnInstall);
+    this._buttonRow.add(this._btnRegister);
     this._buttonRow.add(this._btnUpdate);
     this._buttonRow.add(this._btnUpdateAll);
     this._buttonRow.add(this._btnDelete);
@@ -268,24 +297,52 @@ export class VersionsControl extends Control {
       }, ctx);
     });
 
+    this._btnRegister.setAction(() => {
+      fireAsync(async () => {
+        const root = await ctx.openModal<string | null>(createInputDialog(
+          "Register Existing Strata", "Strata installation folder", "",
+        ));
+        if (root === null) return;
+        if (!root.trim()) throw new Error("A Strata installation folder is required");
+        const config = ctx.getConfig();
+        if (!config) throw new Error("No config loaded");
+        const updated = { ...config };
+        const inspection = await registerStrataInstallation(updated, root.trim());
+        await saveConfig(updated);
+        ctx.setConfig(updated);
+        ctx.showMessage(inspection.ready
+          ? "Strata registered; create a profile for it on the Profiles tab (Create -> Strata)"
+          : "Strata registered with issues; select its row for diagnostics");
+        await this.refreshLocal();
+      }, ctx);
+    });
+
     this._btnDelete.setAction(() => {
       fireAsync(async () => {
         const selected = this._table.getSelectedItem();
         if (!selected) return;
         const config = ctx.getConfig();
         if (!config) throw new Error("No config loaded");
-        const version = (selected.data as VersionInfo).version;
+        const current = selected.data as VersionInfo;
+        const version = current.version;
         if (version === config.activeVersion) {
           ctx.showMessage(`Cannot delete ${version}: it is the active version. Switch to a different version first.`);
           return;
         }
         const confirmed = await ctx.openModal<boolean>(createConfirmDialog(
-          "Delete Version",
-          `Delete ${version}? This will remove all files for this version.`
+          current.runtime === "strata" ? "Unregister Strata" : "Delete Version",
+          current.runtime === "strata"
+            ? strataUnregisterMessage(config, version.slice("strata:".length), current.path)
+            : `Delete ${version}? This will remove all files for this version.`
         ));
         if (!confirmed) return;
-        await uninstallVersion(config, version);
-        ctx.showMessage(`Deleted ${version}`);
+        const updated = { ...config };
+        await uninstallVersion(updated, version);
+        if (current.runtime === "strata") {
+          await saveConfig(updated);
+          ctx.setConfig(updated);
+        }
+        ctx.showMessage(current.runtime === "strata" ? "Strata unregistered; files preserved" : `Deleted ${version}`);
         if (this._mode === "local") await this.refreshLocal();
       }, ctx);
     });
@@ -293,6 +350,11 @@ export class VersionsControl extends Control {
     this._table.setOnSelect((item) => {
       fireAsync(async () => {
         if (this._mode === "local") {
+          if ((item.data as VersionInfo).runtime === "strata") {
+            this.showStrataInspection(item.data as VersionInfo);
+            ctx.showMessage("Strata is selected through a profile: Profiles -> Create -> Strata");
+            return;
+          }
           const config = ctx.getConfig();
           if (!config) throw new Error("No config loaded");
           await switchVersion(config, (item.data as VersionInfo).version);
@@ -404,6 +466,7 @@ export class VersionsControl extends Control {
     this._btnBack.visible = false;
     this._forkButton.visible = false;
     this._btnInstall.visible = true;
+    this._btnRegister.visible = true;
     this._btnInstall.label = "Install";
     this._btnUpdate.visible = true;
     this._btnUpdateAll.visible = true;
@@ -422,6 +485,7 @@ export class VersionsControl extends Control {
     this._versionsSection.hint = "";
     this._btnBack.visible = true;
     this._btnInstall.visible = false;
+    this._btnRegister.visible = false;
     this._btnUpdate.visible = false;
     this._btnUpdateAll.visible = false;
     this._btnDelete.visible = false;
@@ -461,6 +525,7 @@ export class VersionsControl extends Control {
   }
 
   async showBackends(release: RemoteVersion): Promise<void> {
+    this._btnRegister.visible = false;
     const ctx = this._ctx;
     if (!ctx) return;
 
@@ -663,6 +728,10 @@ export class VersionsControl extends Control {
     }
 
     const current = selected.data as VersionInfo;
+    if (current.runtime === "strata") {
+      ctx.showMessage("Strata updates require upstream tooling; managed update support is a later phase");
+      return;
+    }
     ctx.showMessage(`Checking latest ${getFork(current.fork).label} ${BACKEND_LABELS[current.backend] || current.backend}...`);
     const candidate = await this.findLatestUpdateCandidate(current, new Map());
     if (!candidate) {
@@ -695,7 +764,8 @@ export class VersionsControl extends Control {
       return;
     }
 
-    const currentRuntimes = this.pickInstalledRuntimePerBackend(installed);
+    const strataCount = installed.filter((version) => version.runtime === "strata").length;
+    const currentRuntimes = this.pickInstalledRuntimePerBackend(installed.filter((version) => version.runtime !== "strata"));
     const releaseCache = new Map<string, Promise<RemoteVersion[]>>();
     const candidates = (await Promise.all(
       currentRuntimes.map((version) => this.findLatestUpdateCandidate(version, releaseCache)),
@@ -704,7 +774,9 @@ export class VersionsControl extends Control {
     );
 
     if (candidates.length === 0) {
-      ctx.showMessage("All installed runtime/backend combinations are already up to date");
+      ctx.showMessage(strataCount
+        ? "No llama-compatible updates found; Strata requires upstream tooling and was not checked"
+        : "All installed runtime/backend combinations are already up to date");
       return;
     }
 
@@ -712,6 +784,7 @@ export class VersionsControl extends Control {
     const moreLine = candidates.length > previewLines.length ? `...and ${candidates.length - previewLines.length} more` : "";
     const message = [
       `Update ${candidates.length} runtime/backend combination${candidates.length === 1 ? "" : "s"}?`,
+      ...(strataCount ? [`${strataCount} Strata installation(s) excluded: upstream-tool-managed.`] : []),
       "",
       ...previewLines,
       ...(moreLine ? [moreLine] : []),
@@ -756,16 +829,48 @@ export class VersionsControl extends Control {
 
       this._table.setOnHighlight((item) => {
         this._btnDelete.disabled = !item || (item.data as VersionInfo).active;
-        this._btnUpdate.disabled = !item;
+        this._btnDelete.label = (item?.data as VersionInfo | undefined)?.runtime === "strata" ? "Unregister" : "Delete";
+        this._btnUpdate.disabled = !item || (item.data as VersionInfo).runtime === "strata";
+        this.showStrataInspection(item?.data as VersionInfo | undefined);
       });
 
       const sel = this._table.getSelectedItem();
       this._btnDelete.disabled = !sel || (sel.data as VersionInfo).active;
-      this._btnUpdate.disabled = !sel;
+      this._btnDelete.label = (sel?.data as VersionInfo | undefined)?.runtime === "strata" ? "Unregister" : "Delete";
+      this._btnUpdate.disabled = !sel || (sel.data as VersionInfo).runtime === "strata";
+      this.showStrataInspection(sel?.data as VersionInfo | undefined);
       this.markDirty();
-    } catch (err: any) {
-      // ignore
+    } catch (error) {
+      this._ctx?.showMessage(`Failed to refresh installed versions: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  protected showStrataInspection(version?: VersionInfo): void {
+    const inspection = version?.strata;
+    if (!inspection) {
+      this._changelogSection.visible = false;
+      this._changelogSection.title = "Changelog";
+      return;
+    }
+    this._changelogSection.visible = true;
+    this._changelogSection.title = "Strata Inspection";
+    this._changelog.update([
+      `Root: ${inspection.root}`,
+      `Source: ${inspection.sourceTag ?? "tag unknown"}`,
+      `Revision: ${inspection.sourceRevision ?? "unknown"}`,
+      `Engine: ${inspection.engineVersion ?? "unknown"} (${inspection.backend ?? "unknown"})`,
+      `Architectures: ${inspection.architectures.join(", ") || "unknown"}`,
+      `Python: ${inspection.python}`,
+      `Inspection: ${inspection.ready ? "usable model config found" : "configuration incomplete"}`,
+      "Lifecycle: not implemented (cannot Start yet)",
+      ...inspection.issues.map((issue) => `Issue: ${issue}`),
+      ...inspection.configs.flatMap((config) => [
+        `Model: ${config.model || "unknown"}`,
+        `Config: ${config.path}`,
+        ...config.issues.map((issue) => `Issue: ${issue}`),
+      ]),
+    ].join("\n"), true);
+    this.markDirty();
   }
 
 }

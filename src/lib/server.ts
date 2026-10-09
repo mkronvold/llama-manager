@@ -3,12 +3,13 @@ import { EventEmitter } from "events";
 import path from "path";
 import os from "os";
 import fs from "fs-extra";
-import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getErrFile, getLogsDir, getSessionFile, getActivePresets, getActiveFreeFormArgs } from "./config";
+import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getErrFile, getLogsDir, getSessionFile, getActivePresets, getActiveFreeFormArgs, getActiveProfile, isStrataProfile } from "./config";
 import { logParser } from "./logparser";
 import { processLine as processMetricLine, reset as resetMetrics } from "./metricstracker";
 import { processModelLine, resetModelInfo } from "../ui/specialized/LoadedModelPanel";
 import { taskStore } from "./tasks";
 import { detectForkFromFolder, resolveBinaryName, isForkCompatibleWithPreset, isFieldCompatibleWithFork, getFieldFlag, isNegateInverted, getFieldTransform } from "./forks";
+import { isStrataVersion } from "./runtime";
 
 // NB: Windows/POSIX binary-name resolution lives solely in forks.ts's
 // `resolveBinaryName()` (used below), which this file previously duplicated via a
@@ -346,6 +347,9 @@ export function getCurrentErrFile(config?: ConfigData | null): string | null {
 }
 
 export function listDevices(config: ConfigData): string {
+  if (isStrataProfile(getActiveProfile(config))) {
+    return "Use Check/Configure for Strata; device selection is owned by Strata setup";
+  }
   const versionsDir = getVersionsDir(config);
   const activeVersion = config.activeVersion;
   if (!activeVersion) return "No active version selected";
@@ -392,9 +396,17 @@ export function startServer(config: ConfigData): Promise<number> {
       }
 
       const versionsDir = getVersionsDir(config);
+      if (isStrataProfile(getActiveProfile(config))) {
+        reject(new Error(`Profile "${config.server.activeProfile}" uses Strata, which cannot be started yet; switch to a llama.cpp profile`));
+        return;
+      }
       const activeVersion = config.activeVersion;
       if (!activeVersion) {
         reject(new Error("No active version selected"));
+        return;
+      }
+      if (isStrataVersion(activeVersion)) {
+        reject(new Error("Strata lifecycle support is not implemented yet; select a llama-compatible version"));
         return;
       }
 
@@ -610,6 +622,12 @@ export function getStatus(): ServerStatus {
 }
 
 export function buildArgs(config: ConfigData, logFile: string): string[] {
+  if (config.activeVersion && isStrataVersion(config.activeVersion)) {
+    throw new Error("Strata does not accept llama.cpp command-line arguments");
+  }
+  if (isStrataProfile(getActiveProfile(config))) {
+    throw new Error("Strata profiles do not use llama.cpp command-line arguments");
+  }
   const args: string[] = [];
   const p = getActivePresets(config);
 

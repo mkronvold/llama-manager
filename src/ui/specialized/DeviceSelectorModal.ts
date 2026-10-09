@@ -8,6 +8,7 @@ import { modalManager } from "../../framework/ModalManager";
 import { listDevices } from "../../lib/server";
 import { spinnerChar, startSpinner } from "../../lib/utils";
 import type { ConfigData } from "../../lib/config";
+import { getActiveProfile, isStrataProfile } from "../../lib/config";
 import type { Size } from "../../framework/types";
 
 export class DeviceSelectorModal extends Modal {
@@ -80,6 +81,16 @@ export class DeviceSelectorModal extends Modal {
     modalManager.markDirty();
 
     try {
+      if (isStrataProfile(getActiveProfile(this._config))) {
+        this._list.visible = false;
+        this._statusLabel.builder.muted("Use Check/Configure for Strata");
+        this._isScanning = false;
+        this._scanButton.label = "Scan";
+        this._scanButton.disabled = true;
+        this.markDirty();
+        modalManager.markDirty();
+        return;
+      }
       const info = listDevices(this._config);
       const lines = info.split("\n").filter((line: string) => line.trim().length > 0);
       const items = lines.slice(1).map((line: string) => {

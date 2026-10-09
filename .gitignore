@@ -5,5 +5,6 @@ dist/
 # source repo (large binaries would break the repo / GitHub's size limits).
 *.gguf
 /unsloth/
+/Strata/
 
 .commit-msg.txt

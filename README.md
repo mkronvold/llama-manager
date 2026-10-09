@@ -94,16 +94,58 @@ before closing.
 - **Dashboard** — real-time per-slot metrics, server controls (start/stop/restart), loaded model info, and recent-task charts
 - **Logs** — dedicated server log viewer with structured severity coloring
 - **Tasks** — parsed task history with token counts, speeds, draft acceptance, sorting, SQLite persistence, and aggregated charts (tasks/tokens over time)
-- **Profiles** — named server configurations with type-aware preset editors and free-form arguments
-- **Versions** — install, switch, and uninstall llama.cpp builds; browse releases, select backend and fork, view changelogs
+- **Profiles** — named server configurations with type-aware preset editors and free-form arguments; Strata profiles bound to a registered installation, with Check/Configure tool runs
+- **Versions** — install, switch, and uninstall llama.cpp builds; browse releases, select backend and fork, view changelogs; register and inspect existing Windows Strata installations
 - **Models** — search Hugging Face, download GGUF models with progress tracking, set active, delete
 - **Options** — global settings: paths, poll interval, task limits, appearance, theme, HF token, fork selection, update checks
+
+### Strata registration and profiles (Windows)
+
+In **Versions**, choose **Register Strata** and enter the absolute folder of an
+existing [Strata](https://github.com/Niko1221/Strata) source installation prepared
+by its own setup tooling. Registration checks the private `.venv\Scripts\python.exe`
+and imports, source Git identity, `engine\BUILD.json`, and generated `strata-*.json`
+configs, including tokenizer, pack, library and GGUF shard paths. It does not
+run setup, download models, or launch inference.
+
+The table shows source tag and engine version separately. Select the Strata row
+to see inspection diagnostics; incomplete installations remain visible but are
+not usable. **Unregister** removes only the manager registration and preserves
+all source, environment, model and pack files; it lists any profiles that use the
+installation, which then show "installation not registered" until re-bound.
+Generic **Update** is unavailable; **Update All** excludes Strata because source
+and engine updates belong to upstream tooling.
+
+In **Profiles**, **Create** asks for a runtime. Choosing **Strata** picks a
+registered installation and one of its generated configs (auto-selected when
+there is only one), then a profile name. A Strata profile is an ordinary profile
+plus that binding: Duplicate, Rename and Delete work as usual. Only the service
+**host**, **port** and **API key** are editable; host/port are copied from the
+active profile unless unset or still the llama defaults, in which case Strata's
+default `0.0.0.0:1234` is used. A non-loopback bind without any API key shows an
+exposure warning. Model, backend, context, KV, cache and speculative settings are
+shown read-only from the generated config; **Strata Config** switches between
+that installation's configs.
+
+**Check** (`setup.py --check`) and **Configure** (`setup.py --setup --no-start
+--no-browser`) open upstream tooling in a separate PowerShell window from the
+installation folder. The manager never passes `--yes`. Run status survives a
+manager restart: a closed window without an exit code is shown as abandoned, a
+non-zero exit as failed, and Configure is only reported completed if a usable
+config is found afterwards. Only one Configure per installation runs at a time.
+New configs appear in the config selector; existing profiles are not rebound.
+
+Strata lifecycle is not implemented yet: with a Strata profile active, Dashboard
+shows the bound installation instead of a version and Start/Restart are
+disabled, the Models tab does not change the active model/mmproj (the Strata
+model is chosen by Configure), and device scanning is replaced by Check/Configure.
+Existing llama.cpp profiles and the active version are unchanged.
 
 ## Navigation
 
 | Key | Action |
 |---|---|
-| `1`-`7` | Switch tabs |
+| `1`-`8` | Switch tabs |
 | `Alt+Left` / `Alt+Right` | Cycle tabs |
 | `Tab` / `Shift+Tab` | Move focus |
 | `Enter` | Confirm / select |
@@ -123,10 +165,11 @@ before closing.
 | Dashboard | 1 | Per-slot metrics, server controls, model info, recent-task charts |
 | Logs | 2 | Dedicated server log viewer |
 | Tasks | 3 | Parsed task history, aggregated charts view |
-| Profiles | 4 | Profile management, preset editing |
-| Versions | 5 | Local versions, GitHub releases, backend & fork selection, changelog |
-| Models | 6 | Local GGUFs, HF browse, download, delete |
-| Options | 7 | Global app settings |
+| System | 4 | CPU/RAM/GPU memory, model residency, commit headroom and paging |
+| Profiles | 5 | Profile management, preset editing, Strata profiles and Check/Configure |
+| Versions | 6 | Local versions, releases, backend/fork selection, changelog, Strata inspection |
+| Models | 7 | Local GGUFs, HF browse, download, delete |
+| Options | 8 | Global app settings |
 
 ## Storage
 

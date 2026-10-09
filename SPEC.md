@@ -556,6 +556,66 @@ Configurable via `config.defaultFork` (default: `llama.cpp`). Controls which for
 
 Lists installed versions across all supported forks and provides fork-aware install/switch/uninstall actions.
 
+#### Windows Strata registration and profiles (implemented; lifecycle pending)
+
+Strata is a separate runtime, not a llama.cpp fork. Versions can register an
+existing source root as an external installation. Each has a stable manager ID
+(`strata:<id>` in version listings), absolute root, ownership and registration
+timestamp. `config.strataInstallations` defaults to `[]` for legacy configs;
+invalid records or duplicate IDs/roots produce explicit errors rather than
+silently resetting configuration.
+
+Inspection resolves the private Windows Python executable, verifies server
+imports and generated configs, and shows source tag/revision separately from
+engine manifest version/backend/architectures. Config path checks include engine,
+tokenizer, pack files, all numbered GGUF shards and configured library paths.
+Registration can retain an incomplete environment for diagnostics; it does not
+mark it usable. Facts are refreshed from disk, not persisted as stale readiness.
+These are prerequisite checks, not proof of hardware/model compatibility.
+
+Registrations remain listed even if the ordinary versions directory does not
+exist. Enter shows inspection, not active-version selection. Unregister preserves
+the complete installation and all model data regardless of ownership, and its
+confirmation lists profiles bound to the installation. Generic
+Update rejects Strata and Update All excludes it with an explanation. The typed
+runtime boundary identifies upstream-owned settings and JSON telemetry, but its
+Strata lifecycle capability remains disabled. Start/Stop/resume, logs, metrics
+and managed setup/update are later phases; no Strata launch is wired yet.
+
+Profiles: `ServerProfile.strata?: { installationId: string; configPath: string | null }`.
+Absent means a llama-compatible profile (unchanged behavior). `loadConfig`
+preserves and validates the binding (non-empty ID, null or absolute config path);
+invalid bindings are errors, not silent resets, and `saveConfig` validates too.
+The global `activeVersion` is never changed by Strata profiles. Profiles tab
+Create asks for the runtime; a Strata profile starts from default presets with
+empty free-form args and only `server.host`/`port`/`apiKey` visible. Endpoint
+seeding copies the active profile's values unless missing or still the llama
+defaults (127.0.0.1 / 8080), which become 0.0.0.0 / 1234; restore-default uses
+the same. A non-loopback host with no profile or config API key produces a
+non-blocking exposure warning. Generated config settings are displayed read-only
+(path flags as basenames); the config file is never rewritten.
+
+Check/Configure run `setup.py --check` or `setup.py --setup --no-start
+--no-browser` with the installation's private Python, in a new PowerShell window
+via a generated wrapper (`STATE_DIR\strata-ops\<opId>.ps1`, single-quote escaped
+arguments, UTF-8 BOM), opened by a hidden launcher PowerShell using
+`Start-Process` (Node's `detached` spawn has no console on Windows, so it cannot
+host an interactive window). The wrapper writes `.pid` and `.exit` sidecars; only the
+manager writes the versioned `<opId>.json` marker (atomic tmp+move). States:
+starting, running, exited, then completed / failed (non-zero exit or launch
+failure) / abandoned (wrapper gone without exit code, or no PID within 120 s) /
+incomplete (Configure exit 0 without a usable config after revalidation).
+Configure is exclusive per installation and blocked by a running-service hook
+(stubbed until lifecycle exists); Check is blocked only by Configure. The latest
+20 terminal markers per installation are kept. Run status is display-only and
+never used to kill processes.
+
+While a Strata profile is active: `startServer`/`buildArgs` reject it, Dashboard
+shows `strata:<id> (profile)` instead of the version and disables Start/Restart,
+Models tab Set Active and download-as-mmproj do not modify the profile, and
+`listDevices`/Devices modal return a Check/Configure hint instead of running
+`--list-devices`.
+
 #### Display
 
 Local versions list shows fork labels for each installed version:
@@ -842,6 +902,7 @@ Path: `$XDG_CONFIG_HOME/llama-manager/config.json` (resolves to `~/.config/llama
   "modelsDir": null,
   "tasksFile": null,
   "activeVersion": null,
+  "strataInstallations": [],
   "activeModel": null,
   "hfToken": null,
   "defaultFork": "llama.cpp",

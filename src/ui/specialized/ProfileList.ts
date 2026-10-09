@@ -48,11 +48,14 @@ export class ProfileList extends Control {
   setConfig(config: ConfigData, preserveIndex?: boolean): void {
     this._config = config;
     const names = Object.keys(config.server.profiles).sort();
-    const items: ListItem<string, string>[] = names.map(name => ({
-      id: name,
-      label: name === config.server.activeProfile ? `✓ ${name}` : `  ${name}`,
-      data: name,
-    }));
+    const items: ListItem<string, string>[] = names.map(name => {
+      const tag = config.server.profiles[name]?.strata ? "  [Strata]" : "";
+      return {
+        id: name,
+        label: name === config.server.activeProfile ? `✓ ${name}${tag}` : `  ${name}${tag}`,
+        data: name,
+      };
+    });
 
     this._list.items = items;
     this._list.selectedId = config.server.activeProfile;

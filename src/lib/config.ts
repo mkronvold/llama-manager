@@ -1,6 +1,8 @@
 import fs from "fs-extra";
 import path from "path";
 import os from "os";
+import type { StrataInstallation, StrataProfileBinding } from "./runtime";
+import { RuntimeRegistrationError, validateStrataInstallations, validateStrataProfileBinding } from "./runtime";
 
 const isWin = os.platform() === "win32";
 
@@ -111,9 +113,30 @@ export interface ServerPresets {
 export interface ServerProfile {
   presets: ServerPresets;
   freeFormArgs: string[];
+  /** Present only for Strata profiles; absent means the llama-compatible runtime. */
+  strata?: StrataProfileBinding;
+}
+
+export const STRATA_DEFAULT_HOST = "0.0.0.0";
+export const STRATA_DEFAULT_PORT = 1234;
+
+export function isStrataProfile(profile: ServerProfile | undefined): profile is ServerProfile & { strata: StrataProfileBinding } {
+  return !!profile?.strata;
+}
+
+export function getActiveProfile(config: ConfigData): ServerProfile | undefined {
+  return config.server.profiles[config.server.activeProfile];
+}
+
+/** Profile names whose Strata binding references the given installation. */
+export function profilesUsingStrataInstallation(config: ConfigData, installationId: string): string[] {
+  return Object.entries(config.server.profiles)
+    .filter(([, p]) => p.strata?.installationId === installationId)
+    .map(([name]) => name);
 }
 
 export interface ConfigData {
+  strataInstallations?: StrataInstallation[];
   themeName: string;
   themeMode: "dark" | "light";
   versionsDir: string | null;
@@ -376,7 +399,7 @@ export const PRESET_CATEGORIES: PresetCategory[] = [
   },
 ];
 
-const DEFAULT_PRESETS: ServerPresets = {
+export const DEFAULT_PRESETS: ServerPresets = {
   server: {
     host: "127.0.0.1",
     port: 8080,
@@ -528,6 +551,7 @@ const DEFAULT_PRESETS: ServerPresets = {
 };
 
 const DEFAULT_CONFIG: ConfigData = {
+  strataInstallations: [],
   themeName: "opencode",
   themeMode: "dark",
   versionsDir: null,
@@ -640,6 +664,11 @@ export function getSessionFile(): string {
   return path.join(STATE_DIR, "session.json");
 }
 
+/** Status markers and wrapper scripts for upstream Strata Check/Configure runs. */
+export function getStrataOpsDir(): string {
+  return path.join(STATE_DIR, "strata-ops");
+}
+
 export function getActivePresets(config: ConfigData): ServerPresets {
   return config.server.profiles[config.server.activeProfile]?.presets || DEFAULT_PRESETS;
 }
@@ -683,6 +712,7 @@ export async function loadConfig(): Promise<ConfigData> {
     if (!data) return DEFAULT_CONFIG;
 
     const migrated = migrateLegacyConfig(data);
+    const strataInstallations = validateStrataInstallations(migrated.strataInstallations);
 
     const defaultProfiles = DEFAULT_CONFIG.server.profiles;
     const userProfiles = migrated.server?.profiles || {};
@@ -694,6 +724,8 @@ export async function loadConfig(): Promise<ConfigData> {
           presets: mergePresets(userProfiles[key].presets || (DEFAULT_PRESETS as ServerPresets)),
           freeFormArgs: userProfiles[key].freeFormArgs || [],
         };
+        const strata = validateStrataProfileBinding(userProfiles[key].strata, key);
+        if (strata) mergedProfiles[key].strata = strata;
       } else {
         mergedProfiles[key] = defaultProfiles[key];
       }
@@ -707,6 +739,7 @@ export async function loadConfig(): Promise<ConfigData> {
     const merged: ConfigData = {
       ...DEFAULT_CONFIG,
       ...migrated,
+      strataInstallations,
       server: {
         ...DEFAULT_CONFIG.server,
         ...migrated.server,
@@ -735,12 +768,17 @@ export async function loadConfig(): Promise<ConfigData> {
       },
     };
     return merged;
-  } catch {
+  } catch (error) {
+    if (error instanceof RuntimeRegistrationError) throw error;
     return DEFAULT_CONFIG;
   }
 }
 
 export async function saveConfig(config: ConfigData): Promise<void> {
+  validateStrataInstallations(config.strataInstallations);
+  for (const [name, profile] of Object.entries(config.server.profiles)) {
+    validateStrataProfileBinding(profile.strata, name);
+  }
   await fs.ensureDir(CONFIG_DIR);
   await fs.writeJson(CONFIG_PATH, config, { spaces: 2 });
 }

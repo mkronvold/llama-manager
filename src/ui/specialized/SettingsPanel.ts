@@ -4,8 +4,10 @@ import {
   ConfigData,
   PresetFieldDef,
   ServerPresets,
+  isStrataProfile,
   saveConfig,
 } from "../../lib/config";
+import { isPresetFieldVisibleForStrata, strataFieldDefault } from "../../lib/strataprofile";
 import type { RenderContext } from "../../framework/types";
 import { EditableList, EditableRowInfo, formatFieldValue } from "./EditableList";
 import { createDeviceSelectorModal } from "./DeviceSelectorModal";
@@ -70,8 +72,24 @@ export class SettingsPanel extends EditableList {
     this._rows = [];
     if (!this._config) return;
     const profileName = this._editingProfile || this._config.server.activeProfile;
-    const presets = this._config.server.profiles[profileName]?.presets;
+    const profile = this._config.server.profiles[profileName];
+    const presets = profile?.presets;
     if (!presets) return;
+
+    if (isStrataProfile(profile)) {
+      for (let catIdx = 0; catIdx < PRESET_CATEGORIES.length; catIdx++) {
+        const cat = PRESET_CATEGORIES[catIdx]!;
+        const fields = cat.fields
+          .map((field, fieldIdx) => ({ field, fieldIdx }))
+          .filter(({ field }) => isPresetFieldVisibleForStrata(cat.presetKey, field.key));
+        if (!fields.length) continue;
+        this._rows.push({ type: "header", catIdx });
+        if (!this._collapsed.has(catIdx)) {
+          for (const { field, fieldIdx } of fields) this._rows.push({ type: "field", catIdx, fieldIdx, field });
+        }
+      }
+      return;
+    }
 
     const forkId = this._config.activeVersion ? detectForkFromFolder(this._config.activeVersion).id : "llama.cpp";
 
@@ -166,11 +184,9 @@ export class SettingsPanel extends EditableList {
 
   protected saveAndMessage(): void {
     if (!this._config) return;
-    try {
-      saveConfig(this._config);
-    } catch (e) {
+    saveConfig(this._config).catch((e) => {
       this._onMessage?.(`Error saving: ${e}`);
-    }
+    });
   }
 
   // --- Override for escape callback and modal fields ---
@@ -218,9 +234,13 @@ export class SettingsPanel extends EditableList {
     const fieldDef = cat.fields.find(f => f.key === row.field!.key);
     if (!fieldDef) return;
 
-    this.setRowValue(row, fieldDef.default);
+    const profileName = this._editingProfile || this._config?.server.activeProfile || "";
+    const strataDefault = isStrataProfile(this._config?.server.profiles[profileName])
+      ? strataFieldDefault(cat.presetKey, fieldDef.key) : undefined;
+    const value = strataDefault !== undefined ? strataDefault : fieldDef.default;
+    this.setRowValue(row, value);
     this.saveAndMessage();
-    this._onMessage?.(`Restored ${row.field.key} to default: ${fieldDef.default}`);
+    this._onMessage?.(`Restored ${row.field.key} to default: ${value}`);
     this.markDirty();
   }
 

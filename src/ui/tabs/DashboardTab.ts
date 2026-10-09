@@ -19,7 +19,7 @@ import { detectForkFromFolder } from "../../lib/forks";
 import { createStoppingServerModal } from "../specialized/StoppingServerModal";
 import { createSelectorModal } from "../../framework/widgets/SelectorModal";
 import type { SelectorItem } from "../../framework/widgets/SelectorModal";
-import { saveConfig } from "../../lib/config";
+import { getActiveProfile, isStrataProfile, saveConfig } from "../../lib/config";
 import type { TabContext } from "../../lib/tabcontext";
 import type { Size, RenderContext } from "../../framework/types";
 
@@ -220,7 +220,10 @@ export class DashboardControl extends Control {
     const config = this._ctx?.getConfig();
     this._profileSelector.value = config ? config.server.activeProfile : "";
 
-    if (config && config.activeVersion) {
+    const profile = config ? getActiveProfile(config) : undefined;
+    if (config && isStrataProfile(profile)) {
+      this._versionSelector.value = `strata:${profile.strata.installationId} (profile)`;
+    } else if (config && config.activeVersion) {
       const version = config.activeVersion;
       const fork = detectForkFromFolder(version);
       const forkSuffix = fork.id !== "llama.cpp" ? ` [${fork.label}]` : "";
@@ -232,15 +235,17 @@ export class DashboardControl extends Control {
     }
 
     if (!getStatus().running) {
-      this._hintLabel.text = "";
+      this._hintLabel.text = isStrataProfile(profile) ? " Strata Start/Stop arrives in a later phase" : "";
     }
   }
 
   updateButtons(): void {
     const status = getStatus();
-    this._buttons[0].disabled = status.running;
+    const config = this._ctx?.getConfig();
+    const strata = config ? isStrataProfile(getActiveProfile(config)) : false;
+    this._buttons[0].disabled = status.running || strata;
     this._buttons[1].disabled = !status.running;
-    this._buttons[2].disabled = !status.running;
+    this._buttons[2].disabled = !status.running || strata;
   }
 
   markHint(): void {
@@ -318,12 +323,16 @@ export class DashboardControl extends Control {
   async openVersionSelector(): Promise<string | null> {
     const config = this._ctx?.getConfig();
     if (!config) return null;
+    if (isStrataProfile(getActiveProfile(config))) {
+      this._ctx?.showMessage("Strata profiles use their own installation; change it on the Profiles tab");
+      return null;
+    }
     return this.openSelector(
       "Select Version",
       config.activeVersion || null,
       async (cfg) => {
         const versions = await listVersions(cfg);
-        return versions.map((v) => ({
+        return versions.filter((v) => v.runtime !== "strata").map((v) => ({
           id: v.version,
           label: v.active ? `✓ ${v.version}` : v.version,
           sublabel: BACKEND_LABELS[v.backend] || v.backend,
