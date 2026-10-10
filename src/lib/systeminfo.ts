@@ -4,6 +4,8 @@ import path from "path";
 import { spawn } from "child_process";
 import { getVersionsDir } from "./config";
 import type { ConfigData } from "./config";
+import { checkIdentity, descendantsOf, isRecordGone, parseProcessSnapshot, sameExecutable } from "./strataservice";
+import type { ProcessRecord } from "./strataservice";
 
 export type GpuTelemetryMode = "auto" | "windows" | "vendor" | "vulkan" | "disabled";
 
@@ -48,6 +50,7 @@ export interface SystemSnapshot {
   systemwideTotalBytes: number | null;
   /** Where the running server's committed memory actually landed. */
   residency: ProcessMemoryResidency | null;
+  residencyStatus?: string | null;
   /** Commit charge and paging health. */
   pressure: MemoryPressure | null;
   gpuSources: GpuTelemetrySourceSnapshot[];
@@ -64,6 +67,7 @@ export interface SystemSnapshot {
  */
 export interface ProcessMemoryResidency {
   pid: number;
+  pids?: number[];
   /** Private (committed) bytes: GPU allocations plus host-side KV cache/buffers. */
   committedBytes: number;
   /** Committed bytes resident in the dedicated VRAM carve-out. */
@@ -80,6 +84,15 @@ export interface ProcessMemoryResidency {
   /** Resident set size, for reference. */
   workingSetBytes: number;
 }
+
+export interface NativeProcessTarget {
+  pid: number;
+  createdAt: string;
+  executable: string;
+  engineExecutable: string;
+}
+
+export type SystemProcessTarget = number | NativeProcessTarget;
 
 /**
  * Commit charge vs. limit, plus the paging rate. These answer two different
@@ -400,6 +413,7 @@ export function buildResidency(
     if (name === "private") committedBytes = value;
     else if (name === "workingset") workingSetBytes = value;
   }
+
   if (committedBytes === null || committedBytes <= 0) return null;
 
   // A process can hold allocations on more than one adapter, so sum across all
@@ -415,6 +429,53 @@ export function buildResidency(
     elsewhereBytes: Math.max(0, committedBytes - dedicatedBytes - sharedBytes),
     workingSetBytes,
   };
+}
+
+/** Native identities must survive the whole counter sampling window. */
+export function buildNativeResidency(
+  target: NativeProcessTarget, before: ProcessRecord[], after: ProcessRecord[],
+  procLines: string[], dedicatedLines: string[], sharedLines: string[],
+): ProcessMemoryResidency | null {
+  if (checkIdentity(before, target).kind !== "verified" || checkIdentity(after, target).kind !== "verified") return null;
+  const engines = descendantsOf(before, target.pid).filter((p) => sameExecutable(p.executable, target.engineExecutable));
+  if (!engines.length || engines.some((p) => !p.createdAt || !after.find((r) => r.pid === p.pid)?.createdAt || isRecordGone(after, p) ||
+    !sameExecutable(after.find((r) => r.pid === p.pid)?.executable, target.engineExecutable))) return null;
+  const current = descendantsOf(after, target.pid).filter((p) => sameExecutable(p.executable, target.engineExecutable));
+  if (current.length !== engines.length || current.some((p) => !engines.some((old) => old.pid === p.pid))) return null;
+  const parts: ProcessMemoryResidency[] = [];
+  for (const engine of engines) {
+    let ancestor = engine;
+    const visited = new Set<number>();
+    while (ancestor.pid !== target.pid) {
+      if (visited.has(ancestor.pid) || !ancestor.executable || checkIdentity(after, {
+        pid: ancestor.pid, createdAt: ancestor.createdAt, executable: ancestor.executable,
+      }).kind !== "verified") return null;
+      visited.add(ancestor.pid);
+      const parent = before.find((p) => p.pid === ancestor.ppid);
+      if (!parent?.createdAt || !ancestor.createdAt ||
+        Date.parse(parent.createdAt) > Date.parse(ancestor.createdAt)) return null;
+      ancestor = parent;
+    }
+    const fields = procLines.filter((line) => line.startsWith(`${engine.pid}|`)).map((line) => line.slice(line.indexOf("|") + 1));
+    const forPid = (lines: string[]) => {
+      const instances = new Map<string, string>();
+      for (const line of lines.filter((line) => line.startsWith(`pid_${engine.pid}_`))) {
+        const key = line.slice(0, line.lastIndexOf(","));
+        if (!instances.has(key)) instances.set(key, line);
+      }
+      return [...instances.values()];
+    };
+    const dedicated = forPid(dedicatedLines), shared = forPid(sharedLines);
+    if (!dedicated.length || !shared.length) return null;
+    const part = buildResidency(engine.pid, fields, dedicated, shared);
+    if (!part) return null;
+    parts.push(part);
+  }
+  const sum = (key: "committedBytes" | "workingSetBytes" | "dedicatedBytes" | "sharedBytes") =>
+    parts.reduce((total, part) => total + part[key], 0);
+  const committedBytes = sum("committedBytes"), dedicatedBytes = sum("dedicatedBytes"), sharedBytes = sum("sharedBytes");
+  return { pid: engines[0]!.pid, pids: engines.map((p) => p.pid), committedBytes, dedicatedBytes, sharedBytes,
+    workingSetBytes: sum("workingSetBytes"), elsewhereBytes: Math.max(0, committedBytes - dedicatedBytes - sharedBytes) };
 }
 
 export interface DxgiAdapterBudget {
@@ -653,20 +714,20 @@ function emptyPayload(error: string | null): WindowsCountersPayload {
   return { gpus: [], error, sharedGpuRamBytes: null, residency: null, pressure: null };
 }
 
-async function getWindowsCounterGpuSnapshots(serverPid?: number | null): Promise<WindowsCountersPayload> {
-  if (os.platform() !== "win32") {
-    return emptyPayload("Windows performance counters are only available on Windows");
-  }
-
-  // A single powershell invocation gathers all counter sets to avoid paying
-  // process-spawn overhead per refresh, and issues them as one combined
-  // Get-Counter query: querying the paths separately measured 5.1-5.4s on a
-  // 32-core APU, which exceeded the caller's timeout and silently demoted the
-  // System tab to a fallback source. One combined query measures ~2.0s even
-  // with the extra memory/process counters folded in.
-  const script = `
+export function buildWindowsCounterScript(serverPid?: SystemProcessTarget | null): string {
+  const native = typeof serverPid === "object" ? serverPid : null;
+  return `
 $ErrorActionPreference = 'SilentlyContinue'
-$targetPid = ${Math.max(0, Math.floor(serverPid ?? 0))}
+$targetPid = ${Math.max(0, Math.floor(typeof serverPid === "number" ? serverPid : 0))}
+$native = ${native ? "$true" : "$false"}
+$nativeTarget = '${JSON.stringify(native).replace(/'/g, "''")}' | ConvertFrom-Json
+function ProcessSnapshot {
+  Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,Name | ForEach-Object {
+    $c = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }
+    '{0}|{1}|{2}|{3}|{4}' -f $_.ProcessId,$_.ParentProcessId,$c,$_.Name,$_.ExecutablePath
+  }
+}
+$before = if ($native) { @(ProcessSnapshot) } else { @() }
 $paths = @(
   '\\GPU Engine(*)\\Utilization Percentage',
   '\\GPU Adapter Memory(*)\\Dedicated Usage',
@@ -682,6 +743,7 @@ $paths = @(
 $buckets = [ordered]@{
   UTIL = @(); DEDICATED_USED = @(); DEDICATED_LIMIT = @(); SHARED_USED = @(); SHARED_LIMIT = @()
   PROC_DEDICATED = @(); PROC_SHARED = @(); MEM = @(); PROC = @()
+  SNAP_BEFORE = $before; SNAP_AFTER = @()
 }
 function Classify($samplePath) {
   # 'GPU Process Memory' and 'GPU Adapter Memory' share leaf counter names, so
@@ -708,7 +770,7 @@ function Collect($samples) {
     if ($key -eq 'MEM') {
       $buckets[$key] += "$($s.Path -replace '.*\\\\',''),$($s.CookedValue)"
     } elseif ($key -eq 'PROC_DEDICATED' -or $key -eq 'PROC_SHARED') {
-      if ($targetPid -gt 0 -and $s.InstanceName -like "pid_$($targetPid)_*") {
+      if ($native -or ($targetPid -gt 0 -and $s.InstanceName -like "pid_$($targetPid)_*")) {
         $buckets[$key] += "$($s.InstanceName),$($s.CookedValue)"
       }
     } else {
@@ -717,7 +779,7 @@ function Collect($samples) {
   }
 }
 Collect (Get-Counter -Counter $paths -ErrorAction SilentlyContinue).CounterSamples
-if ((($buckets.Values | ForEach-Object { $_.Count }) | Measure-Object -Sum).Sum -eq 0) {
+if ((($buckets.Keys | Where-Object { $_ -notlike 'SNAP_*' } | ForEach-Object { $buckets[$_].Count }) | Measure-Object -Sum).Sum -eq 0) {
   # Get-Counter's array form fails as a unit if any single path is unknown on
   # this machine, so retry each path independently before giving up.
   foreach ($p in $paths) {
@@ -730,6 +792,19 @@ if ($targetPid -gt 0) {
     $buckets['PROC'] += "private,$($proc.PrivateMemorySize64)"
     $buckets['PROC'] += "workingset,$($proc.WorkingSet64)"
   }
+  if ($native) {
+    foreach ($line in $before) {
+      $parts = $line -split '\\|',5
+      if ($parts.Count -eq 5 -and $parts[4] -ieq $nativeTarget.engineExecutable) {
+        $proc = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
+        if ($proc) {
+          $buckets['PROC'] += "$($parts[0])|private,$($proc.PrivateMemorySize64)"
+          $buckets['PROC'] += "$($parts[0])|workingset,$($proc.WorkingSet64)"
+        }
+      }
+    }
+    $buckets['SNAP_AFTER'] = @(ProcessSnapshot)
+  }
 }
 foreach ($key in $buckets.Keys) {
   "---$key---"
@@ -737,6 +812,16 @@ foreach ($key in $buckets.Keys) {
 }
 `;
 
+}
+
+async function getWindowsCounterGpuSnapshots(serverPid?: SystemProcessTarget | null): Promise<WindowsCountersPayload> {
+  if (os.platform() !== "win32") {
+    return emptyPayload("Windows performance counters are only available on Windows");
+  }
+  // Fold native identities into the same invocation rather than querying each
+  // engine/counter separately. Snapshot both sides of the sampling window.
+  const native = typeof serverPid === "object" ? serverPid : null;
+  const script = buildWindowsCounterScript(serverPid);
   const queryOnce = async (): Promise<WindowsCountersPayload> => {
     const [output, dxgiBudgets] = await Promise.all([
       runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], GPU_COUNTER_TIMEOUT_MS),
@@ -748,7 +833,7 @@ foreach ($key in $buckets.Keys) {
 
     const sections: Record<string, string[]> = {
       UTIL: [], DEDICATED_USED: [], DEDICATED_LIMIT: [], SHARED_USED: [], SHARED_LIMIT: [],
-      PROC_DEDICATED: [], PROC_SHARED: [], MEM: [], PROC: [],
+      PROC_DEDICATED: [], PROC_SHARED: [], MEM: [], PROC: [], SNAP_BEFORE: [], SNAP_AFTER: [],
     };
     let current: string | null = null;
     for (const rawLine of output.split(/\r?\n/)) {
@@ -769,8 +854,10 @@ foreach ($key in $buckets.Keys) {
     const sharedLimitByLuid = sumByLuid(sections.SHARED_LIMIT!);
 
     const pressure = parseMemoryPressure(sections.MEM!);
-    const residency = buildResidency(
-      serverPid ?? null,
+    const residency = native ? buildNativeResidency(native,
+      parseProcessSnapshot(sections.SNAP_BEFORE!.join("\n")), parseProcessSnapshot(sections.SNAP_AFTER!.join("\n")),
+      sections.PROC!, sections.PROC_DEDICATED!, sections.PROC_SHARED!) : buildResidency(
+      typeof serverPid === "number" ? serverPid : null,
       sections.PROC!,
       sections.PROC_DEDICATED!,
       sections.PROC_SHARED!,
@@ -1143,7 +1230,7 @@ function sourceResult(id: string, label: string, result: { gpus: GpuSnapshot[]; 
  *  3. AMD amd-smi (gated on Windows)
  *  4. Vulkan ggml runtime memory probe
  */
-export async function getGpuTelemetrySources(config?: ConfigData | null, serverPid?: number | null): Promise<GpuTelemetrySourceSnapshot[]> {
+export async function getGpuTelemetrySources(config?: ConfigData | null, serverPid?: SystemProcessTarget | null): Promise<GpuTelemetrySourceSnapshot[]> {
   return (await collectTelemetry(config, serverPid)).sources;
 }
 
@@ -1154,7 +1241,7 @@ export async function getGpuTelemetrySources(config?: ConfigData | null, serverP
  */
 async function collectTelemetry(
   config?: ConfigData | null,
-  serverPid?: number | null,
+  serverPid?: SystemProcessTarget | null,
 ): Promise<{ sources: GpuTelemetrySourceSnapshot[]; windows: WindowsCountersPayload | null }> {
   const settings = telemetrySettings(config);
   if (settings.mode === "disabled") {
@@ -1197,7 +1284,7 @@ export async function getGpuSnapshots(config?: ConfigData | null): Promise<{ gpu
   };
 }
 
-export async function getSystemSnapshot(config?: ConfigData | null, serverPid?: number | null): Promise<SystemSnapshot> {
+export async function getSystemSnapshot(config?: ConfigData | null, serverPid?: SystemProcessTarget | null): Promise<SystemSnapshot> {
   const [cpuPercent, telemetry] = await Promise.all([
     sampleCpuPercent(),
     collectTelemetry(config, serverPid),
@@ -1229,6 +1316,9 @@ export async function getSystemSnapshot(config?: ConfigData | null, serverPid?: 
     systemwideUsedBytes: hasDedicated ? usedBytes + dedicatedUsed : null,
     systemwideTotalBytes: hasDedicated ? totalBytes + dedicatedTotal : null,
     residency: telemetry.windows?.residency ?? null,
+    residencyStatus: typeof serverPid === "object" && serverPid && !telemetry.windows?.residency
+      ? "Native residency unavailable: engine unloaded/changing, identities or counters unavailable"
+      : null,
     pressure: telemetry.windows?.pressure ?? null,
     gpuSources: gpuResult,
     gpus,

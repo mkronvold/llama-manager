@@ -635,7 +635,7 @@ immediately; failure to read them or to write the marker force-stops the new tre
 Session marker v2 (`STATE_DIR\session.json`): `{version: 2, runtime: "strata",
 sessionId, pid, pidCreatedAt, executable, engineExecutable, startedAt,
 installationId, installationRoot, profileName, configPath, host, port, pollHost,
-logFiles: {out, err, engine, engineStart}, keySource}`; no secrets. Unversioned
+logFiles: {out, err, engine, engineStart}, keySource, runtimeVersion?}`; no secrets. Unversioned
 markers are legacy llama markers with unchanged behavior; a versioned marker that
 does not validate is ignored (never treated as llama).
 
@@ -647,7 +647,8 @@ loading (unreachable before HTTP first seen; no timeout), ready, busy (in-flight
 errors), stopping, failed (process exited; marker cleared) and unverified.
 Log lines are tagged `[out]`/`[err]`/`[engine]` (engine log from its size at
 launch) and only appended to the log buffer, bypassing llama parsers. Strata's
-PID is not passed to System residency.
+Python supervisor PID is not itself attributed as model residency; its frozen
+identity and native engine executable are passed to the System collector.
 
 Stop modes: `graceful` (Dashboard) returns `{ok: false, canForce: true}` when
 `POST /v1/unload` fails (409 busy, unreachable, auth); `force-on-failure`
@@ -662,6 +663,67 @@ dead PID clears the marker; snapshot failure or mismatching creation time/
 executable marks the session unverified (never killed; Dashboard Stop offers
 `clearUnverifiedSession()` after confirmation, Start is blocked, `--stop` exits
 1); verified sessions resume tails/polling (`--stop` uses `monitor: false`).
+
+#### Strata telemetry and durable Tasks
+
+`stratametrics.ts` strictly normalizes stock metrics (finite nonnegative
+measurements, safe counters, newest-first history reversed into completion
+order). Missing measurements stay nullable. The existing session-owned poll
+cycle serializes status and `/metrics?requests=all`, uses auth/no redirects/
+bounded timeouts, aborts at stop and discards obsolete responses. Changes to
+the dashboard interval apply without duplicate timers. Transient failures use
+bounded backoff and state-transition log diagnostics.
+
+Dashboard session totals and Tasks recovered rows are separate. In =
+processed input minus reported reused tokens; requested input remains separate,
+including cancellation during prefill. Out = delivered tokens. TG is reported
+engine rate or known engine-generated / decode time, not delivered / engine
+time. TT requires both PT and ET; wall time is separate. Summary rates use
+paired-known numerators/times and disclose coverage. Session-wide TG is unknown
+when stock totals lack engine-generated counts; retained-history TG is labelled
+separately. Checkpoints, completed slots, truncation and absent measurements
+are not manufactured. Cancelled/disconnected records contribute measured work.
+
+Strata Dashboard uses the llama-style current-session layout: totals first,
+then current live/idle slots sorted by slot ID (or Service for serial operation).
+PP/TG occupy the same left/right columns as llama, with semantic colors and
+the existing basic/middle/detailed controls. Serial idle state retains the latest
+completion's PP/TG and In/Out; active-request rates never fall back to a previous
+completion. Time/drafts describe the explicitly labelled last task. Real slots
+use stock `tok_s` and `elapsed_s`; their unknown measurements remain unavailable.
+Completed history lacks slot association, so a last service completion is
+shown separately rather than assigned to an idle parallel slot. No historical
+session list is added to Dashboard. The summary TG position is labelled history
+and discloses paired measurement coverage; it is not an upstream session TG.
+
+`taskdb.ts` upgrades SQLite `user_version` to 1 after an awaited `db.backup`
+of an existing WAL database, rebuilding transactionally while preserving
+legacy rowids/data. `tasks` uniqueness becomes `(runtime, source_session,
+task_id)`, with nullable requested/processed/cached input, engine output, wall
+time and finish fields. `task_sources` stores watermarks; `task_history_gaps`
+stores missing ordinal ranges independently of tasks/charts.
+`task_log_sources` records owned llama log ranges and frozen origin, allowing
+startup archive recovery into the original sessions rather than duplicating
+scoped tasks in the legacy namespace.
+Strata source session = frozen manager session ID + `totals.since` epoch.
+For total T and retained N, ascending completions receive T-N+1 through T.
+Rows, gaps and watermark are committed atomically; retries/replays do not
+inflate stats. Same-epoch counter regression/missing epoch/inconsistent history
+pauses ingestion visibly, not creating fabricated source identities.
+
+New llama launch markers add `sessionId`, frozen `profileName`/model and
+per-launch `logStart`; parser source/timers/completed IDs are reset at session
+boundaries. Legacy markers acquire stable manager identity with
+`taskSourceLegacy: true`, keeping unprovable old task provenance in the legacy
+namespace. Startup awaits DB initialization before reattach/replay.
+`tasktypes.ts` separates nullable stored measurements from llama parser output;
+all Tasks formatting and charts retain real zeros and missing points distinctly.
+
+System's combined Windows invocation captures process snapshots around counter
+collection. Supervisor creation/executable identity and native descendant
+identity must survive sampling. Native PID/counter identities are deduplicated;
+Python private bytes are excluded. Replacement/missing measurements yield no
+residency rather than misleading zero; host/adapter accounting stays unchanged.
 
 #### Display
 

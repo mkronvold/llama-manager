@@ -143,10 +143,10 @@ export class TaskChartsSection extends Section {
   fetchData(capacity: number): void {
     const tasks = taskStore.getRange(0, capacity, undefined, "timestamp", "desc");
 
-    const inputSpeedData: number[] = [];
-    const outputSpeedData: number[] = [];
-    const inputTokenData: number[] = [];
-    const outputTokenData: number[] = [];
+    const inputSpeedData: (number | null)[] = [];
+    const outputSpeedData: (number | null)[] = [];
+    const inputTokenData: (number | null)[] = [];
+    const outputTokenData: (number | null)[] = [];
     const labels: string[] = [];
 
     for (let i = tasks.length - 1; i >= 0; i--) {
@@ -250,7 +250,7 @@ export class TaskChartsControl extends Control {
 
     const tokensData = taskStore.getTokensOverTime(this._timeBucket, count);
     this._tokensChart.setData(
-      tokensData.map(d => d.promptTokens + d.outputTokens),
+      tokensData.map(d => d.promptTokens !== null && d.outputTokens !== null ? d.promptTokens + d.outputTokens : null),
       tokensData.map(d => d.label),
     );
 

@@ -13,9 +13,17 @@ function findLatestLogFile(config: ConfigData): string | null {
   if (files.length === 0) return null;
   return path.join(logsDir, files[files.length - 1]);
 }
-import { TaskMetrics, logParser } from "./logparser";
-export type { TaskMetrics } from "./logparser";
+import { type TaskMetrics as LlamaTask, logParser } from "./logparser";
+import type { StoredTask as TaskMetrics, TaskSource } from "./tasktypes";
+import type { StrataMetrics } from "./stratametrics";
+import { migrateTaskDatabase } from "./taskdb";
+export type { StoredTask as TaskMetrics } from "./tasktypes";
 import { EventEmitter } from "events";
+
+function logPathKey(file: string): string {
+  const resolved = path.resolve(file);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 
 export interface TaskFilter {
   slotId?: number;
@@ -39,8 +47,8 @@ export interface ChartDataPoint {
 
 export interface TokensDataPoint {
   label: string;
-  promptTokens: number;
-  outputTokens: number;
+  promptTokens: number | null;
+  outputTokens: number | null;
 }
 
 const SORT_FIELD_MAP: Record<TaskSortField, string> = {
@@ -54,10 +62,11 @@ const SORT_FIELD_MAP: Record<TaskSortField, string> = {
   outputTokens: "output_tokens",
 };
 
-class TaskStore extends EventEmitter {
+export class TaskStore extends EventEmitter {
   private db: Database.Database | null = null;
   private config: ConfigData | null = null;
   private stopTailer: (() => void) | null = null;
+  private source: TaskSource = { runtime: "llama", sessionId: "legacy" };
 
   private stmts = {
     insertTask: null as Database.Statement | null,
@@ -68,14 +77,28 @@ class TaskStore extends EventEmitter {
   private getStmts() {
     if (this.stmts.insertTask) return this.stmts;
     this.stmts.insertTask = this.db!.prepare(`
-      INSERT OR REPLACE INTO tasks (
+      INSERT INTO tasks (
         task_id, slot_id, timestamp, profile, model, version,
         prompt_tokens, prompt_time_ms, prompt_speed,
         output_tokens, eval_time_ms, output_speed,
         total_tokens, total_time_ms,
         draft_accepted, draft_generated,
-        context_size, truncated, graphs_reused
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        context_size, truncated, graphs_reused,
+        runtime, source_session, requested_input, processed_input, cached_input,
+        engine_output, wall_time_ms, finish_reason
+      ) VALUES (${Array(27).fill("?").join(",")})
+      ON CONFLICT(runtime, source_session, task_id) DO UPDATE SET
+        slot_id=excluded.slot_id, timestamp=excluded.timestamp,
+        profile=excluded.profile, model=excluded.model, version=excluded.version,
+        prompt_tokens=excluded.prompt_tokens, prompt_time_ms=excluded.prompt_time_ms,
+        prompt_speed=excluded.prompt_speed, output_tokens=excluded.output_tokens,
+        eval_time_ms=excluded.eval_time_ms, output_speed=excluded.output_speed,
+        total_tokens=excluded.total_tokens, total_time_ms=excluded.total_time_ms,
+        draft_accepted=excluded.draft_accepted, draft_generated=excluded.draft_generated,
+        context_size=excluded.context_size, truncated=excluded.truncated, graphs_reused=excluded.graphs_reused,
+        requested_input=excluded.requested_input, processed_input=excluded.processed_input,
+        cached_input=excluded.cached_input, engine_output=excluded.engine_output,
+        wall_time_ms=excluded.wall_time_ms, finish_reason=excluded.finish_reason
     `);
     this.stmts.upsertStats = this.db!.prepare("INSERT OR REPLACE INTO stats_cache (key, value) VALUES (?, ?)");
     this.stmts.getCache = this.db!.prepare("SELECT value FROM stats_cache WHERE key = ?");
@@ -90,70 +113,59 @@ class TaskStore extends EventEmitter {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
 
-    this.createTables();
+    try {
+      await migrateTaskDatabase(this.db, dbPath);
+    } catch (error) {
+      this.db.close();
+      this.db = null;
+      throw error;
+    }
+    this.rebuildStats();
     this.migrateJsonl(getTasksFile(config));
     this.getStmts();
 
-    logParser.seedCompleted(this.getAllTaskIds());
+    this.setSource({ runtime: "llama", sessionId: "legacy" });
     logParser.setConfig(config);
 
     const latestLog = findLatestLogFile(config);
     if (latestLog) {
-      await logParser.parseExistingFile(latestLog);
+      const owners = this.db.prepare(`SELECT session_id,log_start,profile,model,version
+        FROM task_log_sources WHERE log_path=? ORDER BY log_start,recorded_at`)
+        .all(logPathKey(latestLog)) as { session_id: string; log_start: number; profile: string | null; model: string | null; version: string | null }[];
+      if (owners.length) {
+        for (let i = 0; i < owners.length; i++) {
+          const owner = owners[i]!;
+          this.setSource({ runtime: "llama", sessionId: owner.session_id,
+            profile: owner.profile ?? undefined, model: owner.model ?? undefined, version: owner.version ?? undefined });
+          await logParser.parseExistingFile(latestLog, owner.log_start, owners[i + 1]?.log_start);
+        }
+      } else {
+        await logParser.parseExistingFile(latestLog);
+      }
     }
-
-    // Clear completed IDs so live tailing only tracks tasks in the current session.
-    // Task IDs are not unique across server restarts, so keeping old IDs would
-    // cause new tasks with reused IDs to be silently skipped.
-    logParser.clearCompleted();
 
     this.emit("updated");
   }
 
-  setLogFile(logFile: string) {
+  setSource(source: TaskSource): void {
+    this.stopTailer?.();
+    this.stopTailer = null;
+    logParser.stop();
+    this.source = { ...source };
+    logParser.setSource(source);
+    logParser.seedCompleted(this.getAllTaskIds());
+  }
+
+  setLogFile(logFile: string, startOffset = 0) {
     if (this.stopTailer) {
       this.stopTailer();
     }
-    this.stopTailer = logParser.startFileTailer(logFile);
-  }
-
-  private createTables() {
-    this.db!.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-        task_id INTEGER UNIQUE,
-        slot_id INTEGER,
-        timestamp TEXT,
-        profile TEXT,
-        model TEXT,
-        version TEXT,
-        prompt_tokens INTEGER,
-        prompt_time_ms REAL,
-        prompt_speed REAL,
-        output_tokens INTEGER,
-        eval_time_ms REAL,
-        output_speed REAL,
-        total_tokens INTEGER,
-        total_time_ms REAL,
-        draft_accepted INTEGER,
-        draft_generated INTEGER,
-        context_size INTEGER,
-        truncated INTEGER,
-        graphs_reused INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS idx_tasks_timestamp ON tasks(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_tasks_slot_id ON tasks(slot_id);
-      CREATE INDEX IF NOT EXISTS idx_tasks_model ON tasks(model);
-      CREATE TABLE IF NOT EXISTS stats_cache (
-        key TEXT PRIMARY KEY,
-        value REAL
-      );
-    `);
-
-    const cnt = this.db!.prepare("SELECT COUNT(*) as cnt FROM stats_cache").get() as { cnt: number };
-    if (cnt.cnt === 0) {
-      this.rebuildStats();
+    if (this.db && this.source.runtime === "llama" && this.source.sessionId !== "legacy") {
+      this.db.prepare("INSERT OR IGNORE INTO task_log_sources VALUES (?,?,?,?,?,?,?)")
+        .run(this.source.sessionId, logPathKey(logFile), startOffset, Date.now(),
+          this.source.profile ?? null, this.source.model ?? null, this.source.version ?? null);
     }
+    this.stopTailer = logParser.startFileTailer(logFile, startOffset);
   }
 
   private migrateJsonl(jsonlPath: string) {
@@ -181,13 +193,13 @@ class TaskStore extends EventEmitter {
         output_tokens, eval_time_ms, output_speed,
         total_tokens, total_time_ms,
         draft_accepted, draft_generated,
-        context_size, truncated, graphs_reused
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        context_size, truncated, graphs_reused, engine_output
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const ins = this.db.transaction(() => {
       for (const line of lines) {
-        const t = JSON.parse(line) as TaskMetrics;
+        const t = JSON.parse(line) as LlamaTask;
         insert.run(
           t.taskId, t.slotId, t.timestamp,
           t.profile ?? null, t.model ?? null, t.version ?? null,
@@ -195,7 +207,7 @@ class TaskStore extends EventEmitter {
           t.outputTokens, t.evalTimeMs, t.outputSpeed,
           t.totalTokens, t.totalTimeMs,
           t.draftAccepted ?? 0, t.draftGenerated ?? 0,
-          t.contextSize, t.truncated ? 1 : 0, t.graphsReused ?? 0,
+          t.contextSize, t.truncated ? 1 : 0, t.graphsReused ?? 0, t.outputTokens,
         );
       }
     });
@@ -231,51 +243,87 @@ class TaskStore extends EventEmitter {
 
   private getAllTaskIds(): number[] {
     if (!this.db) return [];
-    const rows = this.db.prepare("SELECT task_id FROM tasks").all() as { task_id: number }[];
+    const rows = this.db.prepare("SELECT task_id FROM tasks WHERE runtime=? AND source_session=?")
+      .all(this.source.runtime, this.source.sessionId) as { task_id: number }[];
     return rows.map(r => r.task_id);
   }
 
-  private getCacheValue(key: string): number {
-    if (!this.db) return 0;
-    const gc = this.getStmts().getCache!;
-    const row = gc.get(key) as { value: number } | undefined;
-    return row ? row.value : 0;
-  }
-
-  onTask(task: TaskMetrics) {
-    if (!this.db) return;
-    const s = this.getStmts();
-    const ins = s.insertTask!;
-    const ups = s.upsertStats!;
-    const gc = s.getCache!;
-
-    ins.run(
+  private insertTask(task: TaskMetrics): void {
+    this.getStmts().insertTask!.run(
       task.taskId, task.slotId, task.timestamp,
       task.profile ?? null, task.model ?? null, task.version ?? null,
       task.promptTokens, task.promptTimeMs, task.promptSpeed,
-      task.outputTokens, task.evalTimeMs, task.outputSpeed,
-      task.totalTokens, task.totalTimeMs,
-      task.draftAccepted ?? 0, task.draftGenerated ?? 0,
-      task.contextSize, task.truncated ? 1 : 0, task.graphsReused ?? 0,
+      task.outputTokens, task.evalTimeMs, task.outputSpeed, task.totalTokens, task.totalTimeMs,
+      task.draftAccepted, task.draftGenerated, task.contextSize,
+      task.truncated === null ? null : task.truncated ? 1 : 0, task.graphsReused,
+      task.runtime, task.sourceSession, task.requestedInput, task.processedInput, task.cachedInput,
+      task.engineOutput, task.wallTimeMs, task.finishReason,
     );
+  }
 
-    const da = gc.get("total_count") as { value: number } | undefined;
-    const dpt = gc.get("total_prompt_tokens") as { value: number } | undefined;
-    const dptm = gc.get("total_prompt_time_ms") as { value: number } | undefined;
-    const dot = gc.get("total_output_tokens") as { value: number } | undefined;
-    const detm = gc.get("total_eval_time_ms") as { value: number } | undefined;
-    const dda = gc.get("total_draft_accepted") as { value: number } | undefined;
-    const ddg = gc.get("total_draft_generated") as { value: number } | undefined;
-
-    ups.run("total_count", (da?.value ?? 0) + 1);
-    ups.run("total_prompt_tokens", (dpt?.value ?? 0) + task.promptTokens);
-    ups.run("total_prompt_time_ms", (dptm?.value ?? 0) + task.promptTimeMs);
-    ups.run("total_output_tokens", (dot?.value ?? 0) + task.outputTokens);
-    ups.run("total_eval_time_ms", (detm?.value ?? 0) + task.evalTimeMs);
-    ups.run("total_draft_accepted", (dda?.value ?? 0) + (task.draftAccepted ?? 0));
-    ups.run("total_draft_generated", (ddg?.value ?? 0) + (task.draftGenerated ?? 0));
-
+  onTask(task: LlamaTask) {
+    if (!this.db || this.source.runtime !== "llama") return;
+    const stored: TaskMetrics = { ...task, runtime: "llama", sourceSession: this.source.sessionId,
+      requestedInput: null, processedInput: null, cachedInput: null,
+      engineOutput: task.outputTokens, wallTimeMs: null, finishReason: null };
+    this.db.transaction(() => { this.insertTask(stored); this.rebuildStats(); })();
     this.emit("updated");
+  }
+
+  ingestStrata(source: TaskSource, snapshot: StrataMetrics): number {
+    if (!this.db) throw new Error("Tasks database is not ready");
+    if (snapshot.epoch === null) throw new Error("Strata history epoch is unavailable; durable recovery is paused");
+    const sessionId = `${source.sessionId}:${snapshot.epoch}`;
+    const watermark = this.db.prepare("SELECT watermark FROM task_sources WHERE runtime='strata' AND session_id=?")
+      .get(sessionId) as { watermark: number } | undefined;
+    const previous = watermark?.watermark ?? 0;
+    if (snapshot.count < previous) throw new Error("Strata completion counter regressed within the same epoch");
+    if (watermark && snapshot.count === previous) return this.getHistoryGapCount(source.sessionId);
+    let inserted = 0;
+    this.db.transaction(() => {
+      const oldest = snapshot.count - snapshot.kept + 1;
+      if (oldest > previous + 1) {
+        this.db!.prepare("INSERT OR IGNORE INTO task_history_gaps VALUES (?,?,?)")
+          .run(sessionId, previous + 1, oldest - 1);
+      }
+      for (const r of snapshot.requests) {
+        if (r.ordinal <= previous) continue;
+        this.insertTask({
+          taskId: r.ordinal, timestamp: r.timestamp, slotId: null,
+          runtime: "strata", sourceSession: sessionId,
+          profile: source.profile, version: source.version, model: snapshot.model ?? source.model,
+          promptTokens: r.evaluatedInput, promptTimeMs: r.promptMs,
+          promptSpeed: r.evaluatedInput !== null && r.promptMs !== null && r.promptMs > 0 ? r.evaluatedInput * 1000 / r.promptMs : null,
+          outputTokens: r.output, evalTimeMs: r.decodeMs, outputSpeed: r.decodeRate,
+          totalTimeMs: r.totalMs, totalTokens: r.evaluatedInput !== null && r.output !== null ? r.evaluatedInput + r.output : null,
+          draftAccepted: r.draftsAccepted, draftGenerated: r.draftsOffered,
+          draftAcceptance: r.draftsAccepted !== null && r.draftsOffered !== null && r.draftsOffered > 0 ? r.draftsAccepted / r.draftsOffered : null,
+          contextSize: null, truncated: null, graphsReused: null,
+          requestedInput: r.requestedInput, processedInput: r.processedInput, cachedInput: r.cachedInput,
+          engineOutput: r.engineOutput, wallTimeMs: r.wallMs, finishReason: r.finish,
+        });
+        inserted++;
+      }
+      this.db!.prepare("INSERT INTO task_sources VALUES ('strata',?,?) ON CONFLICT(runtime,session_id) DO UPDATE SET watermark=excluded.watermark")
+        .run(sessionId, snapshot.count);
+      this.rebuildStats();
+    })();
+    if (inserted || snapshot.count > previous) this.emit("updated");
+    return this.getHistoryGapCount(source.sessionId);
+  }
+
+  getHistoryGapCount(managerSession?: string): number {
+    if (!this.db) return 0;
+    const rows = this.db.prepare("SELECT session_id,first_ordinal,last_ordinal FROM task_history_gaps")
+      .all() as { session_id: string; first_ordinal: number; last_ordinal: number }[];
+    return rows.filter((r) => !managerSession || r.session_id.startsWith(`${managerSession}:`))
+      .reduce((sum, r) => sum + r.last_ordinal - r.first_ordinal + 1, 0);
+  }
+
+  getHistoryGaps(): { sessionId: string; first: number; last: number }[] {
+    if (!this.db) return [];
+    return this.db.prepare("SELECT session_id AS sessionId,first_ordinal AS first,last_ordinal AS last FROM task_history_gaps")
+      .all() as { sessionId: string; first: number; last: number }[];
   }
 
   getTotalCount(filter?: TaskFilter): number {
@@ -290,65 +338,49 @@ class TaskStore extends EventEmitter {
     const { sql, params } = this.buildFilter(filter);
     const col = SORT_FIELD_MAP[sortField];
     const dir = sortDir.toUpperCase();
-    const query = `SELECT * FROM tasks ${sql} ORDER BY ${col} ${dir} LIMIT ? OFFSET ?`;
+    const query = `SELECT * FROM tasks ${sql} ORDER BY ${col} ${dir}, rowid ${dir} LIMIT ? OFFSET ?`;
     const rows = this.db.prepare(query).all(...params, limit, offset) as Record<string, unknown>[];
     return rows.map(r => this.rowToTask(r));
   }
 
   getStats(filter?: TaskFilter) {
-    if (!filter) {
-      const cnt = this.getCacheValue("total_count");
-      const pt = this.getCacheValue("total_prompt_tokens");
-      const ptm = this.getCacheValue("total_prompt_time_ms");
-      const ot = this.getCacheValue("total_output_tokens");
-      const etm = this.getCacheValue("total_eval_time_ms");
-      const da = this.getCacheValue("total_draft_accepted");
-      const dg = this.getCacheValue("total_draft_generated");
-
-      const avgPromptSpeed = ptm > 0 ? (pt / ptm) * 1000 : 0;
-      const avgOutputSpeed = etm > 0 ? (ot / etm) * 1000 : 0;
-      const avgDraftAcceptance = dg > 0 ? da / dg : 0;
-
-      return {
-        avgPromptSpeed,
-        avgOutputSpeed,
-        totalTokens: pt + ot,
-        totalPromptTokens: pt,
-        totalOutputTokens: ot,
-        avgDraftAcceptance,
-        count: cnt,
-      };
-    }
-
     if (!this.db) {
-      return { avgPromptSpeed: 0, avgOutputSpeed: 0, totalTokens: 0, totalPromptTokens: 0, totalOutputTokens: 0, avgDraftAcceptance: 0, count: 0 };
+      return { avgPromptSpeed: null, avgOutputSpeed: null, totalTokens: 0, totalPromptTokens: 0, totalOutputTokens: 0, avgDraftAcceptance: null, count: 0, promptMeasured: 0, outputMeasured: 0, inputKnown: 0, outputKnown: 0 };
     }
 
     const { sql, params } = this.buildFilter(filter);
     const row = this.db.prepare(`
       SELECT
         COUNT(*) as cnt,
-        COALESCE(SUM(prompt_tokens), 0) as pt,
-        COALESCE(SUM(prompt_time_ms), 0) as ptm,
-        COALESCE(SUM(output_tokens), 0) as ot,
-        COALESCE(SUM(eval_time_ms), 0) as etm,
-        COALESCE(SUM(draft_accepted), 0) as da,
-        COALESCE(SUM(draft_generated), 0) as dg
+        SUM(prompt_tokens) as pt, COUNT(prompt_tokens) as input_known,
+        SUM(output_tokens) as ot, COUNT(output_tokens) as output_known,
+        SUM(CASE WHEN prompt_tokens IS NOT NULL AND prompt_time_ms > 0 THEN prompt_tokens END) as rate_pt,
+        SUM(CASE WHEN prompt_tokens IS NOT NULL AND prompt_time_ms > 0 THEN prompt_time_ms END) as ptm,
+        COUNT(CASE WHEN prompt_tokens IS NOT NULL AND prompt_time_ms > 0 THEN 1 END) as pc,
+        SUM(CASE WHEN engine_output IS NOT NULL AND eval_time_ms > 0 THEN engine_output END) as rate_ot,
+        SUM(CASE WHEN engine_output IS NOT NULL AND eval_time_ms > 0 THEN eval_time_ms END) as etm,
+        COUNT(CASE WHEN engine_output IS NOT NULL AND eval_time_ms > 0 THEN 1 END) as oc,
+        SUM(CASE WHEN draft_accepted IS NOT NULL AND draft_generated IS NOT NULL THEN draft_accepted END) as da,
+        SUM(CASE WHEN draft_accepted IS NOT NULL AND draft_generated IS NOT NULL THEN draft_generated END) as dg
       FROM tasks ${sql}
-    `).get(...params) as { cnt: number; pt: number; ptm: number; ot: number; etm: number; da: number; dg: number };
+    `).get(...params) as { cnt: number; pt: number | null; ptm: number | null; ot: number | null; etm: number | null; da: number | null; dg: number | null; rate_pt: number | null; rate_ot: number | null; pc: number; oc: number; input_known: number; output_known: number };
 
-    const avgPromptSpeed = row.ptm > 0 ? (row.pt / row.ptm) * 1000 : 0;
-    const avgOutputSpeed = row.etm > 0 ? (row.ot / row.etm) * 1000 : 0;
-    const avgDraftAcceptance = row.dg > 0 ? row.da / row.dg : 0;
+    const avgPromptSpeed = row.ptm !== null && row.ptm > 0 && row.rate_pt !== null ? row.rate_pt * 1000 / row.ptm : null;
+    const avgOutputSpeed = row.etm !== null && row.etm > 0 && row.rate_ot !== null ? row.rate_ot * 1000 / row.etm : null;
+    const avgDraftAcceptance = row.dg !== null && row.dg > 0 && row.da !== null ? row.da / row.dg : null;
 
     return {
       avgPromptSpeed,
       avgOutputSpeed,
-      totalTokens: row.pt + row.ot,
-      totalPromptTokens: row.pt,
-      totalOutputTokens: row.ot,
+      totalTokens: row.cnt === 0 ? 0 : row.pt !== null && row.ot !== null ? row.pt + row.ot : null,
+      totalPromptTokens: row.cnt === 0 ? 0 : row.pt,
+      totalOutputTokens: row.cnt === 0 ? 0 : row.ot,
       avgDraftAcceptance,
       count: row.cnt,
+      promptMeasured: row.pc,
+      outputMeasured: row.oc,
+      inputKnown: row.input_known,
+      outputKnown: row.output_known,
     };
   }
 
@@ -399,25 +431,33 @@ class TaskStore extends EventEmitter {
   private rowToTask(row: Record<string, unknown>): TaskMetrics {
     return {
       taskId: row.task_id as number,
-      slotId: row.slot_id as number,
-      timestamp: row.timestamp as string,
+      rowId: row.rowid as number,
+      slotId: row.slot_id as number | null,
+      timestamp: row.timestamp as string | null,
       profile: row.profile as string | undefined,
       model: row.model as string | undefined,
       version: row.version as string | undefined,
-      promptTokens: row.prompt_tokens as number,
-      promptTimeMs: row.prompt_time_ms as number,
-      promptSpeed: row.prompt_speed as number,
-      outputTokens: row.output_tokens as number,
-      evalTimeMs: row.eval_time_ms as number,
-      outputSpeed: row.output_speed as number,
-      totalTokens: row.total_tokens as number,
-      totalTimeMs: row.total_time_ms as number,
-      draftAccepted: row.draft_accepted as number,
-      draftGenerated: row.draft_generated as number,
-      draftAcceptance: row.draft_generated ? (row.draft_accepted as number) / (row.draft_generated as number) : 0,
-      contextSize: row.context_size as number,
-      truncated: (row.truncated as number) === 1,
-      graphsReused: row.graphs_reused as number,
+      promptTokens: row.prompt_tokens as number | null,
+      promptTimeMs: row.prompt_time_ms as number | null,
+      promptSpeed: row.prompt_speed as number | null,
+      outputTokens: row.output_tokens as number | null,
+      evalTimeMs: row.eval_time_ms as number | null,
+      outputSpeed: row.output_speed as number | null,
+      totalTokens: row.total_tokens as number | null,
+      totalTimeMs: row.total_time_ms as number | null,
+      draftAccepted: row.draft_accepted as number | null,
+      draftGenerated: row.draft_generated as number | null,
+      draftAcceptance: row.draft_accepted !== null && row.draft_generated ? (row.draft_accepted as number) / (row.draft_generated as number) : null,
+      contextSize: row.context_size as number | null,
+      truncated: row.truncated === null ? null : row.truncated === 1,
+      graphsReused: row.graphs_reused as number | null,
+      runtime: row.runtime as "llama" | "strata", sourceSession: row.source_session as string,
+      requestedInput: row.requested_input as number | null,
+      processedInput: row.processed_input as number | null,
+      cachedInput: row.cached_input as number | null,
+      engineOutput: row.engine_output as number | null,
+      wallTimeMs: row.wall_time_ms as number | null,
+      finishReason: row.finish_reason as string | null,
     };
   }
 
@@ -443,17 +483,17 @@ class TaskStore extends EventEmitter {
     const startDate = labels[0]!;
     const rows = this.db.prepare(`
       SELECT ${fmt} as bucket,
-        COALESCE(SUM(prompt_tokens), 0) as pt,
-        COALESCE(SUM(output_tokens), 0) as ot
+        SUM(prompt_tokens) as pt,
+        SUM(output_tokens) as ot
       FROM tasks
       WHERE timestamp >= ?
       GROUP BY bucket
-    `).all(startDate) as { bucket: string; pt: number; ot: number }[];
+    `).all(startDate) as { bucket: string; pt: number | null; ot: number | null }[];
     const dataMap = new Map(rows.map(r => [r.bucket, { promptTokens: r.pt, outputTokens: r.ot }]));
     return labels.map(label => ({
       label,
-      promptTokens: dataMap.get(label)?.promptTokens ?? 0,
-      outputTokens: dataMap.get(label)?.outputTokens ?? 0,
+      promptTokens: dataMap.has(label) ? dataMap.get(label)!.promptTokens : 0,
+      outputTokens: dataMap.has(label) ? dataMap.get(label)!.outputTokens : 0,
     }));
   }
 
@@ -484,11 +524,12 @@ class TaskStore extends EventEmitter {
       this.db.close();
       this.db = null;
     }
+    this.stmts = { insertTask: null, upsertStats: null, getCache: null };
   }
 }
 
 export const taskStore = new TaskStore();
 
-logParser.on("task", (task: TaskMetrics) => {
+logParser.on("task", (task: LlamaTask) => {
   taskStore.onTask(task);
 });

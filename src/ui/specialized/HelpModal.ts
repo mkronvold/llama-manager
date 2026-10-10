@@ -1,5 +1,5 @@
 import { Modal } from "../../framework/widgets/Modal";
-import { Control } from "../../framework/Control";
+import { Scrollable } from "../../framework/widgets/Scrollable";
 import { fg } from "../../lib/theme";
 import { modalManager } from "../../framework/ModalManager";
 import type { RenderContext, Size } from "../../framework/types";
@@ -28,6 +28,15 @@ const HELP_SECTIONS = [
     ],
   },
   {
+    title: "Strata measurements",
+    keys: [
+      ["In / TG", "Evaluated input / engine decode rate"],
+      ["TT / Wall", "Prompt + decode / end-to-end duration (details)"],
+      ["n/a", "Unavailable measurement, not zero"],
+      ["History", "Tasks = recovered rows; gaps exclude missing requests"],
+    ],
+  },
+  {
     title: "Tab Shortcuts",
     keys: [
       ["1", "Dashboard - metrics and server control"],
@@ -42,8 +51,8 @@ const HELP_SECTIONS = [
   },
 ];
 
-class HelpContent extends Control {
-  focusable = false;
+class HelpContent extends Scrollable {
+  focusable = true;
 
   draw(ctx: RenderContext): void {
     const { canvas } = ctx;
@@ -67,8 +76,9 @@ class HelpContent extends Control {
       }
     }
 
-    for (let i = 0; i < this.rect.height && i < contentLines.length; i++) {
-      const line = contentLines[i]!;
+    this.contentHeight = contentLines.length;
+    for (let i = 0; i < this.rect.height && i + this.scrollOffset < contentLines.length; i++) {
+      const line = contentLines[i + this.scrollOffset]!;
       canvas.moveTo(x, y + i);
 
       if (line.isTitle) {
@@ -90,7 +100,7 @@ export class HelpModal extends Modal {
   constructor() {
     super();
     this.title = "Help";
-    this.hint = "? close";
+    this.hint = "? close  Up/Down scroll";
     this.setMinSize(60, 22);
     this.setMaxSize(90, 30);
 

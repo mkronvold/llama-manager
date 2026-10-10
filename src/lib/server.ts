@@ -3,6 +3,9 @@ import { EventEmitter } from "events";
 import path from "path";
 import os from "os";
 import fs from "fs-extra";
+import { createHash, randomUUID } from "node:crypto";
+import type { TaskSource } from "./tasktypes";
+import { createFileTail } from "./logtail";
 import { ConfigData, PRESET_CATEGORIES, getVersionsDir, getLogFile, getErrFile, getLogsDir, getSessionFile, getActivePresets, getActiveFreeFormArgs, getActiveProfile, isStrataProfile } from "./config";
 import { logParser } from "./logparser";
 import { processLine as processMetricLine, reset as resetMetrics } from "./metricstracker";
@@ -19,6 +22,7 @@ import type { StrataServiceState } from "./strataservice";
 
 export type { StopMode, StopResult } from "./stratasession";
 export { isStrataInstallationInUse } from "./stratasession";
+export { getStrataProcessTarget, setStrataPollInterval } from "./stratasession";
 
 // NB: Windows/POSIX binary-name resolution lives solely in forks.ts's
 // `resolveBinaryName()` (used below), which this file previously duplicated via a
@@ -70,6 +74,17 @@ interface SessionFileInfo {
   activeVersion: string | null;
   logFile: string | null;
   errFile?: string | null;
+  sessionId?: string;
+  profileName?: string;
+  model?: string;
+  logStart?: number;
+  taskSourceLegacy?: boolean;
+}
+
+function llamaSource(info: SessionFileInfo): TaskSource {
+  return { runtime: "llama",
+    sessionId: info.taskSourceLegacy || !info.sessionId ? "legacy" : info.sessionId,
+    profile: info.profileName, model: info.model, version: info.activeVersion ?? undefined };
 }
 
 function writeSessionFile(info: SessionFileInfo): void {
@@ -129,6 +144,7 @@ setStrataHost({
   resetBuffer: () => {
     stopDetachedLogTail();
     stopErrTail();
+    taskStore.setSource({ runtime: "strata", sessionId: "inactive" });
     resetMetrics();
     resetModelInfo();
     serverLogLines.length = 0;
@@ -170,6 +186,15 @@ export function detectExistingSession(options: DetectSessionOptions = {}): Detec
   }
   detachedSessionPid = info.pid;
   detachedSessionStartedAt = info.startedAt;
+  if (!info.sessionId) {
+    info.sessionId = createHash("sha256").update(JSON.stringify([info.startedAt, info.logFile, info.activeVersion])).digest("hex");
+    // Pre-migration tasks cannot be retroactively assigned to a launch safely.
+    info.taskSourceLegacy = true;
+    writeSessionFile(info);
+  }
+  stopDetachedLogTail();
+  stopErrTail();
+  taskStore.setSource(llamaSource(info));
   if (info.logFile) {
     currentLogFile = info.logFile;
     // Backfill the in-memory log buffer, task metrics, and loaded-model info
@@ -177,8 +202,8 @@ export function detectExistingSession(options: DetectSessionOptions = {}): Detec
     // never saw any of its stdout live), then keep tailing for new lines so
     // the Dashboard/Logs/System tabs stay in sync with the still-running
     // detached server.
-    tailDetachedLogFile(info.logFile);
-    taskStore.setLogFile(info.logFile);
+    tailDetachedLogFile(info.logFile, info.logStart ?? 0);
+    taskStore.setLogFile(info.logFile, info.logStart ?? 0);
   }
   if (info.errFile) {
     currentErrFile = info.errFile;
@@ -237,7 +262,7 @@ let detachedTailStop: (() => void) | null = null;
  * `LogParser.startFileTailer()`'s polling approach for the task-history
  * parser, but feeds the raw line buffer/metrics/model-info paths instead.
  */
-function tailDetachedLogFile(filePath: string): void {
+function tailDetachedLogFile(filePath: string, startOffset = 0): void {
   if (detachedTailStop) {
     detachedTailStop();
     detachedTailStop = null;
@@ -246,58 +271,8 @@ function tailDetachedLogFile(filePath: string): void {
   resetModelInfo();
   serverLogLines.length = 0;
 
-  let position = 0;
-
-  // Read whatever is already on disk synchronously so the Dashboard/Logs
-  // tabs reflect the already-running server immediately on this launch,
-  // rather than only after the first async poll interval fires.
-  try {
-    if (fs.pathExistsSync(filePath)) {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const lines = content.split("\n");
-      for (const line of lines) {
-        if (line.trim()) ingestLogLine(line);
-      }
-      position = Buffer.byteLength(content, "utf-8");
-    }
-  } catch {
-    // best-effort; fall through to polling, which will retry
-  }
-
-  let stopped = false;
-
-  const poll = async () => {
-    if (stopped) return;
-    try {
-      const stat = await fs.stat(filePath);
-      if (stat.size < position) position = 0; // file rotated/truncated
-      if (stat.size === position) return;
-
-      const fd = await fs.open(filePath, "r");
-      try {
-        const buf = Buffer.alloc(stat.size - position);
-        await fs.read(fd, buf, 0, buf.length, position);
-        position += buf.length;
-
-        const text = buf.toString("utf-8");
-        const lines = text.split("\n");
-        for (const line of lines) {
-          if (line.trim()) ingestLogLine(line);
-        }
-      } finally {
-        await fs.close(fd);
-      }
-    } catch {
-      // Log file may not exist yet, be temporarily locked, or the server
-      // may have exited between polls — best-effort, try again next tick.
-    }
-  };
-
-  const interval = setInterval(poll, 1000);
-  detachedTailStop = () => {
-    stopped = true;
-    clearInterval(interval);
-  };
+  const tail = createFileTail(filePath, startOffset, ingestLogLine);
+  detachedTailStop = () => tail.stop(true);
 }
 
 function stopDetachedLogTail(): void {
@@ -537,7 +512,14 @@ function startLlamaServer(config: ConfigData): Promise<number> {
       await fs.ensureDir(path.dirname(logFile));
       stopDetachedLogTail();
       stopErrTail();
-      taskStore.setLogFile(logFile);
+      const source: TaskSource = {
+        runtime: "llama", sessionId: randomUUID(), profile: config.server.activeProfile,
+        version: activeVersion,
+        model: (getActivePresets(config).model.model as string | undefined) ?? (getActivePresets(config).model.hfRepo as string | undefined),
+      };
+      const logStart = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
+      taskStore.setSource(source);
+      taskStore.setLogFile(logFile, logStart);
       const logStream = await fs.createWriteStream(logFile, { flags: "a" });
 
       // Raw stderr (crashes, GGML asserts, backend/driver errors) is often
@@ -583,6 +565,10 @@ function startLlamaServer(config: ConfigData): Promise<number> {
         activeVersion: config.activeVersion ?? null,
         logFile,
         errFile,
+        sessionId: source.sessionId,
+        profileName: source.profile,
+        model: source.model,
+        logStart,
       });
 
       serverProcess.stdout?.pipe(logStream);

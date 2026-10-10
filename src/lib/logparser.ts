@@ -2,6 +2,8 @@ import { EventEmitter } from "events";
 import fs from "fs-extra";
 import path from "path";
 import type { ConfigData } from "./config";
+import type { TaskSource } from "./tasktypes";
+import { createFileTail } from "./logtail";
 
 export interface TaskMetrics {
   taskId: number;
@@ -138,6 +140,24 @@ export class LogParser extends EventEmitter {
   private _config: ConfigData | null = null;
   private taskBuffer = new Map<number, Partial<TaskMetrics>>();
   private completedTaskIds = new Set<number>();
+  private source: TaskSource | null = null;
+
+  setSource(source: TaskSource): void {
+    this.source = { ...source };
+  }
+
+  private setOrigin(task: TaskMetrics): void {
+    if (this.source) {
+      task.profile = this.source.profile;
+      task.model = this.source.model;
+      task.version = this.source.version;
+    } else if (this._config) {
+      const presets = this._config.server.profiles[this._config.server.activeProfile]?.presets;
+      task.profile = this._config.server.activeProfile;
+      task.model = (presets?.model?.model as string | undefined) ?? (presets?.model?.hfRepo as string | undefined);
+      task.version = this._config.activeVersion ?? undefined;
+    }
+  }
 
   setConfig(config: ConfigData): void {
     this._config = config;
@@ -160,12 +180,7 @@ export class LogParser extends EventEmitter {
 
     if (metrics.contextSize !== undefined) {
       const complete = fillDefaults(merged);
-      if (this._config) {
-        const presets = this._config.server.profiles[this._config.server.activeProfile]?.presets;
-        complete.profile = this._config.server.activeProfile;
-        complete.model = (presets?.model?.model as string | undefined) ?? (presets?.model?.hfRepo as string | undefined) ?? undefined;
-        complete.version = this._config.activeVersion ?? undefined;
-      }
+      this.setOrigin(complete);
       this.completedTaskIds.add(key);
       this.taskBuffer.delete(key);
       const timer = this.tailTimers.get(key);
@@ -182,79 +197,54 @@ export class LogParser extends EventEmitter {
         const buf = this.taskBuffer.get(key);
         if (buf) {
           const complete = fillDefaults(buf);
-          if (this._config) {
-            const presets = this._config.server.profiles[this._config.server.activeProfile]?.presets;
-            complete.profile = this._config.server.activeProfile;
-            complete.model = (presets?.model?.model as string | undefined) ?? (presets?.model?.hfRepo as string | undefined) ?? undefined;
-            complete.version = this._config.activeVersion ?? undefined;
-          }
+          this.setOrigin(complete);
           this.completedTaskIds.add(key);
           this.taskBuffer.delete(key);
           this.tailTimers.delete(key);
           this.emit("task", complete);
         }
       }, 1000);
+      const previous = this.tailTimers.get(key);
+      if (previous) clearTimeout(previous);
       this.tailTimers.set(key, timer);
     }
 
     return null;
   }
 
-  async parseExistingFile(filePath: string): Promise<void> {
+  async parseExistingFile(filePath: string, startOffset = 0, endOffset?: number): Promise<void> {
     if (!(await fs.pathExists(filePath))) {
       return;
     }
-    const content = await fs.readFile(filePath, "utf-8");
+    const bytes = await fs.readFile(filePath);
+    const content = bytes.subarray(startOffset, endOffset).toString("utf-8");
     const lines = content.split("\n");
     for (const line of lines) {
       if (line.trim()) {
         this.processLine(line);
       }
     }
+    for (const [key, partial] of this.taskBuffer) {
+      if (partial.totalTimeMs === undefined || partial.totalTokens === undefined) continue;
+      const complete = fillDefaults(partial);
+      this.setOrigin(complete);
+      this.completedTaskIds.add(key);
+      this.taskBuffer.delete(key);
+      const timer = this.tailTimers.get(key);
+      if (timer) clearTimeout(timer);
+      this.tailTimers.delete(key);
+      this.emit("task", complete);
+    }
   }
 
-  startFileTailer(filePath: string): () => void {
-    let watchInterval: ReturnType<typeof setInterval> | null = null;
-    let position = 0;
-
-    const poll = async () => {
-      try {
-        const stat = await fs.stat(filePath);
-        if (stat.size < position) {
-          position = 0; // file was rotated or truncated
-        }
-        if (stat.size === position) return;
-
-        const fd = await fs.open(filePath, "r");
-        try {
-          const buf = Buffer.alloc(stat.size - position);
-          await fs.read(fd, buf, 0, buf.length, position);
-          position += buf.length;
-
-          const text = buf.toString("utf-8");
-          const lines = text.split("\n");
-          for (const line of lines) {
-            if (line.trim()) {
-              this.processLine(line);
-            }
-          }
-        } finally {
-          await fs.close(fd);
-        }
-      } catch {
-        // File may not exist yet or be inaccessible
-      }
-    };
-
-    poll();
-    watchInterval = setInterval(poll, 500);
-
-    return () => {
-      if (watchInterval) clearInterval(watchInterval);
-    };
+  startFileTailer(filePath: string, startOffset = 0): () => void {
+    const tail = createFileTail(filePath, startOffset, (line) => this.processLine(line), 500);
+    return () => tail.stop();
   }
 
   clearCompleted(): void {
+    for (const timer of this.tailTimers.values()) clearTimeout(timer);
+    this.tailTimers.clear();
     this.taskBuffer.clear();
     this.completedTaskIds.clear();
   }

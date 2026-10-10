@@ -44,7 +44,7 @@ export class BarChart extends Control {
   focusable = false;
 
   // ── Data ──
-  protected _data: number[] = [];
+  protected _data: (number | null)[] = [];
   protected _labels: string[] = [];
   protected _title = "";
 
@@ -77,8 +77,8 @@ export class BarChart extends Control {
 
   // ── Getters / setters ──
 
-  get data(): number[] { return this._data; }
-  set data(v: number[]) {
+  get data(): (number | null)[] { return this._data; }
+  set data(v: (number | null)[]) {
     if (v !== this._data) { this._data = v; this._scrollOffset = 0; this.markDirty(); }
   }
 
@@ -129,7 +129,7 @@ export class BarChart extends Control {
 
   // ── Convenience ──
 
-  setData(data: number[], labels?: string[]): void {
+  setData(data: (number | null)[], labels?: string[]): void {
     this._data = data;
     this._labels = labels || [];
     this._scrollOffset = 0;
@@ -227,7 +227,7 @@ export class BarChart extends Control {
     if (isBlock) {
       // Block mode: 1 bar per column
       if (dataIdx < this._data.length) {
-        const val = this._data[dataIdx]!;
+        const val = this._data[dataIdx] ?? null;
         const label = this._labels[dataIdx] || "";
         this._hoverSubtitle = this.buildHoverSubtitle(label, [val]);
       } else {
@@ -235,12 +235,12 @@ export class BarChart extends Control {
       }
     } else {
       // Braille mode: 2 bars per column
-      const vals: number[] = [];
+      const vals: (number | null)[] = [];
       const labels: string[] = [];
       for (let side = 0; side < 2; side++) {
         const idx = dataIdx + side;
         if (idx < this._data.length) {
-          vals.push(this._data[idx]!);
+          vals.push(this._data[idx] ?? null);
           labels.push(this._labels[idx] || "");
         }
       }
@@ -250,8 +250,8 @@ export class BarChart extends Control {
     this.markDirty();
   }
 
-  protected buildHoverSubtitle(label: string, values: number[]): string {
-    const vals = values.map(v => this.formatTick(v)).join(", ");
+  protected buildHoverSubtitle(label: string, values: (number | null)[]): string {
+    const vals = values.map(v => v === null ? "n/a" : this.formatTick(v)).join(", ");
     return label ? `${label}: ${vals}` : vals;
   }
 
@@ -345,7 +345,8 @@ export class BarChart extends Control {
       for (let side = 0; side < 2; side++) {
         const dataIdx = globalCol * 2 + side;
         if (dataIdx >= this._data.length) break;
-        const val = this._data[dataIdx]!;
+        const val = this._data[dataIdx];
+        if (val === null || val === undefined) continue;
         const normalized = Math.max(0, Math.min(1, (val - yMin) / range));
         const barHeight = Math.round(normalized * logicalHeight);
         for (let y = 0; y < barHeight; y++) {
@@ -449,7 +450,8 @@ export class BarChart extends Control {
     // Plot bars
     for (let c = 0; c < visibleCols; c++) {
       const dataIdx = visibleStartCol + c;
-      const val = this._data[dataIdx]!;
+      const val = this._data[dataIdx];
+      if (val === null || val === undefined) continue;
       const normalized = Math.max(0, Math.min(1, (val - yMin) / range));
       const barHeight = Math.round(normalized * logicalHeight);
 
@@ -601,6 +603,7 @@ export class BarChart extends Control {
     let min = Infinity;
     let max = -Infinity;
     for (const v of this._data) {
+      if (v === null) continue;
       if (v < min) min = v;
       if (v > max) max = v;
     }

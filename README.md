@@ -162,8 +162,53 @@ session that cannot be verified is shown as unverified and is never stopped
 automatically: Stop then only clears its marker after confirmation.
 `llama-manager --stop` and **Stop & Exit** force-stop after a failed unload, and
 report failure (exit code 1, or staying open) unless shutdown is confirmed.
-Per-request metrics, tasks and System memory attribution for Strata are not
-implemented yet.
+
+### Strata metrics and task recovery
+
+Dashboard polls stock `/metrics?requests=all` in the session-owned loop, even
+when another tab is selected. It shows service activity, prompt progress,
+reported rates/real live slots, queue and concurrency, and upstream **session
+totals**. The current-session panel follows the llama Dashboard layout: totals
+above slot-ordered activity, PP on the left and TG on the right, and completion
+timings/drafts below. Serial service activity keeps the last completed task's
+rates/tokens visible when idle, rather than replacing them with empty live data.
+Reported parallel slots use their own rates; the latest service completion is
+separate because upstream history does not identify its slot. Dashboard does
+not list earlier sessions; those remain in Tasks. The summary TG is explicitly
+labelled **history**, with measured coverage, because stock aggregate totals lack
+engine-generated counts. Loaded Model distinguishes requested context/KV/spec from reported
+values. A failed/auth-rejected/malformed snapshot is shown as unavailable;
+last good data stays explicitly stale, not idle.
+
+Tasks contains **recovered stored history**, not an invented copy of session
+totals. **In** is evaluated input (processed minus cached); details show total
+requested, processed and cached input. **Out** is delivered output, while
+**TG** is the engine decode rate: engine-generated tokens can differ from
+delivered tokens. Aggregate TG uses known engine-count/time pairs. **TT** is
+prompt time + decode time; wall duration is separate. Unsupported measurements
+show `n/a` and absent chart points, not zero. Cancelled/disconnected completions
+retain their finish reason and count their measured work.
+
+Strata retains at most 500 completions. Reattach imports retained records once
+using session/epoch completion ordinals; identical requests remain distinct.
+Unavailable earlier ranges are persisted as history gaps, disclosed in
+Dashboard/Tasks and excluded from task/token charts. If counters/epochs are
+inconsistent or a database write fails, recovery is visibly paused and retried,
+without advancing its watermark. Prompt/response capture is not enabled.
+
+The Tasks DB migration makes future llama and Strata tasks session-scoped:
+reused displayed IDs no longer overwrite older sessions. It preserves existing
+rows and creates a WAL-safe `tasks.db.pre-session-<timestamp>.bak` before
+transactional migration. Pre-existing unscoped llama markers/archive rows remain
+in the legacy namespace until a new managed launch; old origins are not guessed.
+Startup awaits DB readiness before replay or polling.
+
+System attributes model residency only to identity-verified native engine
+descendants, not Python, and follows engine replacements. Missing counters or
+changing identities leave residency unavailable. Host/adapter totals are not
+increased by adding those per-process allocations again. Halo lifecycle is
+live-accepted; phase-5 metrics/history/memory acceptance and proart CUDA/parallel
+workload validation remain separate gates.
 
 ## Navigation
 

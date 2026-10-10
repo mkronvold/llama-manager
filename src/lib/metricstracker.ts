@@ -1,4 +1,14 @@
 import { EventEmitter } from "events";
+import type { StrataMetricsView } from "./stratametrics";
+
+let strataMetrics: StrataMetricsView | null = null;
+
+export function getStrataMetrics(): StrataMetricsView | null { return strataMetrics; }
+
+export function setStrataMetrics(value: StrataMetricsView | null): void {
+  strataMetrics = value;
+  emitter.emit("change");
+}
 
 export interface SlotCheckpoint {
   pos: number;
@@ -359,6 +369,7 @@ export function processLine(line: string) {
 }
 
 export function reset() {
+  strataMetrics = null;
   slots.clear();
   completedTasks.length = 0;
   taskAccumulators.clear();

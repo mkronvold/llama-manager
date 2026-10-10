@@ -21,11 +21,34 @@ const key = process.env.STRATA_API_KEY || null;
 console.log("[strata] loading fake model (key " + (key ? "set" : "none") + ")");
 let engine = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
 let loaded = true;
+let activeMetrics = 0, maxMetrics = 0, metricsRequests = 0;
 const server = http.createServer((req, res) => {
   if (key && req.headers.authorization !== "Bearer " + key) { res.writeHead(401); res.end(); return; }
   if (req.url === "/v1/status") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ loaded, model: "fake-model", activity: { in_flight: busy ? 1 : 0 } }));
+    return;
+  }
+  if (req.url === "/probe") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ activeMetrics, maxMetrics, metricsRequests }));
+    return;
+  }
+  if (req.url === "/metrics?requests=all") {
+    metricsRequests++; activeMetrics++; maxMetrics = Math.max(maxMetrics, activeMetrics);
+    setTimeout(() => {
+      activeMetrics--;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        engine: { model: "fake-model", max_context: 8192, spec: 6, kv: "int8" },
+        live: { state: loaded ? "idle" : "unloaded", queued: 0 },
+        totals: { since: 1000, requests: 1, prompt_tokens: 20, reused: 5, output_tokens: 8 },
+        requests_kept: 1,
+        requests: [{ time: 1000, prompt_total: 20, prompt_tokens: 20, reused: 5,
+          output_tokens: 8, engine_generated: 10, prompt_ms: 100, decode_ms: 1000,
+          duration_s: 1.2, finish: "stop" }],
+      }));
+    }, Number(process.env.FAKE_METRICS_DELAY || 0));
     return;
   }
   if (req.url === "/v1/unload" && req.method === "POST") {
@@ -289,4 +312,52 @@ describe.skipIf(os.platform() !== "win32")("Strata session lifecycle", () => {
       await new Promise<void>((r) => blocker.close(() => r()));
     }
   });
+
+  it("polls sequentially off-tab, freezes task origin and replays detached history once", async () => {
+    extraEnv = { FAKE_METRICS_DELAY: "600" };
+    const { taskStore } = await import("../tasks");
+    const { getStrataMetrics } = await import("../metricstracker");
+    await taskStore.init(config);
+    try {
+      await server.startServer(config);
+      config.server.activeProfile = "Default";
+      await until(() => taskStore.getTotalCount() === 1);
+      expect(taskStore.getRange(0, 1)[0]).toMatchObject({
+        profile: "strata-fake", version: "Strata source unknown / engine unknown", promptTokens: 15, outputTokens: 8, engineOutput: 10,
+      });
+      const firstAt = getStrataMetrics()?.receivedAt;
+      session.setStrataPollInterval(250);
+      await until(() => getStrataMetrics()?.receivedAt !== firstAt);
+      const probe = await (await fetch(`http://127.0.0.1:${port}/probe`)).json();
+      expect(probe.maxMetrics).toBe(1);
+      expect(probe.metricsRequests).toBeGreaterThanOrEqual(2);
+      expect(taskStore.getTotalCount()).toBe(1);
+
+      session.resetStrataSessionForTests();
+      server.detectExistingSession({ monitor: true, config, pollIntervalMs: 250 });
+      await until(() => getStrataMetrics()?.snapshot?.count === 1);
+      expect(taskStore.getTotalCount()).toBe(1);
+      expect(getStrataMetrics()).toMatchObject({ error: null, historyError: null });
+    } finally {
+      await server.stopServer({ mode: "force" });
+      taskStore.dispose();
+    }
+  }, 60_000);
+
+  it("aborts pending metrics on stop without late task or UI publication", async () => {
+    extraEnv = { FAKE_METRICS_DELAY: "5000" };
+    const { taskStore } = await import("../tasks");
+    const { getStrataMetrics } = await import("../metricstracker");
+    await taskStore.init(config);
+    try {
+      await server.startServer(config);
+      await until(() => server.getStatus().state === "ready");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await server.stopServer({ mode: "force" });
+      expect(getStrataMetrics()).toBeNull();
+      expect(taskStore.getTotalCount()).toBe(0);
+    } finally {
+      taskStore.dispose();
+    }
+  }, 60_000);
 });

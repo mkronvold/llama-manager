@@ -11,13 +11,16 @@ import type { StrataInspection } from "./strata";
 import { findStrataInstallation, readStrataConfigSummary } from "./strataprofile";
 import {
   buildStrataEnvironment, checkIdentity, checkPortAvailable, deriveStrataState, descendantsOf,
-  describeUnloadFailure, fetchStrataStatus, isRecordGone, readConfigApiKey, requestStrataUnload,
+  describeUnloadFailure, fetchStrataStatus, fetchStrataMetrics, isRecordGone, readConfigApiKey, requestStrataUnload,
   resolvePollHost, resolveStrataApiKey, sameExecutable, strataBaseUrl, windowsProcessSnapshot,
 } from "./strataservice";
 import type { ApiKeySource, ProcessRecord, ProcessSnapshotProvider, StrataPollResult, StrataServiceState } from "./strataservice";
 import { createFileTail, fileSizeOrZero } from "./logtail";
 import type { FileTail } from "./logtail";
 import { setStrataModelView } from "../ui/specialized/LoadedModelPanel";
+import { setStrataMetrics } from "./metricstracker";
+import type { StrataMetricsView } from "./stratametrics";
+import { taskStore } from "./tasks";
 
 /** Session marker v2 (STATE_DIR/session.json). Never contains secrets. */
 export interface StrataSessionMarker {
@@ -38,6 +41,7 @@ export interface StrataSessionMarker {
   pollHost: string;
   logFiles: { out: string; err: string; engine: string | null; engineStart: number };
   keySource: ApiKeySource;
+  runtimeVersion?: string;
 }
 
 export function isStrataSessionMarker(value: unknown): value is StrataSessionMarker {
@@ -114,6 +118,7 @@ interface ConfigView {
   backend: string | null;
   context: string | null;
   kv: string | null;
+  spec?: string | null;
 }
 
 interface ActiveSession {
@@ -130,6 +135,9 @@ interface ActiveSession {
   pollTimer: ReturnType<typeof setTimeout> | null;
   pollIntervalMs: number;
   view: ConfigView;
+  request: AbortController | null;
+  metrics: StrataMetricsView;
+  failures: number;
 }
 
 let active: ActiveSession | null = null;
@@ -171,6 +179,7 @@ async function loadConfigView(marker: StrataSessionMarker): Promise<ConfigView> 
     backend: summary.backend,
     context: fmtTokens(setting("max-context")),
     kv: setting("kv"),
+    spec: setting("spec"),
   };
 }
 
@@ -196,6 +205,11 @@ function publishView(): void {
     state: s.state,
     since: loading ? s.marker.startedAt : null,
     detail: loading ? s.lastStatusLine : s.detail,
+    reported: s.metrics.snapshot ? {
+      context: s.metrics.snapshot.context, kv: s.metrics.snapshot.kv, spec: s.metrics.snapshot.spec,
+    } : null,
+    requestedSpec: s.view.spec ?? null,
+    reportedStale: !!s.metrics.error,
   });
 }
 
@@ -236,9 +250,13 @@ async function pollOnce(s: ActiveSession): Promise<void> {
     handleUnexpectedExit(s, null);
     return;
   }
+  const controller = new AbortController();
+  s.request = controller;
   const key = resolveKey(s.marker, await readConfigApiKey(s.marker.configPath));
-  const result = await fetchStrataStatus(strataBaseUrl(s.marker.pollHost, s.marker.port), key);
-  if (active !== s || s.stopping) return;
+  if (active !== s || s.stopping || controller.signal.aborted) return;
+  const baseUrl = strataBaseUrl(s.marker.pollHost, s.marker.port);
+  const result = await fetchStrataStatus(baseUrl, key, 5000, controller.signal);
+  if (active !== s || s.stopping || controller.signal.aborted) return;
   if (result.kind === "ok") {
     s.httpSeen = true;
     if (result.status.model && s.view.model !== result.status.model) s.view.model = result.status.model;
@@ -246,10 +264,45 @@ async function pollOnce(s: ActiveSession): Promise<void> {
   s.lastPoll = result;
   const next = deriveStrataState({ stopping: false, httpSeen: s.httpSeen, poll: result });
   setState(s, next.state, next.detail);
-  schedulePoll(s, s.pollIntervalMs);
+  let error: string | null = null;
+  let historyError: string | null = null;
+  if (result.kind === "ok") {
+    try {
+      const snapshot = await fetchStrataMetrics(baseUrl, key, controller.signal);
+      if (active !== s || s.stopping || controller.signal.aborted) return;
+      s.metrics.snapshot = snapshot;
+      s.metrics.receivedAt = Date.now();
+      try {
+        s.metrics.missingRequests = taskStore.ingestStrata({
+          runtime: "strata", sessionId: s.marker.sessionId, profile: s.marker.profileName,
+          version: s.marker.runtimeVersion ?? (snapshot.engineVersion ? `Strata engine ${snapshot.engineVersion}` : `strata:${s.marker.installationId}`),
+        }, snapshot);
+      } catch (failure) {
+        historyError = errorMessage(failure);
+      }
+    } catch (failure) {
+      error = errorMessage(failure);
+    }
+  } else {
+    error = result.kind === "unauthorized" ? "Strata rejected the API key" :
+      result.kind === "http-error" ? `Strata status HTTP ${result.status}` : `Strata status ${result.error}`;
+  }
+  if (active !== s || s.stopping || controller.signal.aborted) return;
+  if (error !== s.metrics.error || historyError !== s.metrics.historyError) {
+    if (error || historyError) host?.ingest(`[server] Telemetry: ${error ?? historyError}`);
+    else if (s.metrics.error || s.metrics.historyError) host?.ingest("[server] Strata telemetry recovered");
+  }
+  s.metrics.error = error;
+  s.metrics.historyError = historyError;
+  setStrataMetrics({ ...s.metrics });
+  publishView();
+  s.request = null;
+  s.failures = error ? Math.min(s.failures + 1, 4) : 0;
+  schedulePoll(s, Math.min(30_000, s.pollIntervalMs * 2 ** s.failures));
 }
 
 function stopMonitoring(s: ActiveSession): void {
+  s.request?.abort();
   if (s.pollTimer) clearTimeout(s.pollTimer);
   s.pollTimer = null;
   for (const tail of s.tails) tail.stop(true);
@@ -262,6 +315,8 @@ function handleUnexpectedExit(s: ActiveSession, code: number | null): void {
   clearMarkerFile();
   active = null;
   const message = `Strata service exited${code !== null ? ` with code ${code}` : ""}`;
+  s.metrics.error = message;
+  setStrataMetrics({ ...s.metrics });
   host?.ingest(`[server] ${message}`);
   setStrataModelView({
     ...s.view,
@@ -280,12 +335,16 @@ function activate(marker: StrataSessionMarker, child: ChildProcess | null, monit
     lastStatusLine: null, stopping: false, tails: [], pollTimer: null,
     pollIntervalMs: Math.max(250, pollIntervalMs),
     view: { model: path.basename(marker.configPath, ".json"), backend: null, context: null, kv: null },
+    request: null, metrics: { snapshot: null, receivedAt: null, error: null, historyError: null,
+      missingRequests: taskStore.getHistoryGapCount(marker.sessionId) }, failures: 0,
   };
   active = s;
   unverified = null;
   child?.on("exit", (code) => handleUnexpectedExit(s, code));
   if (!monitor) return s;
   host?.resetBuffer();
+  taskStore.setSource({ runtime: "strata", sessionId: marker.sessionId });
+  setStrataMetrics({ ...s.metrics });
   host?.setLogFiles(marker.logFiles.out, marker.logFiles.err);
   const { out, err, engine, engineStart } = marker.logFiles;
   s.tails.push(createFileTail(out, 0, (line) => onOutLine(s, line)));
@@ -415,6 +474,7 @@ export async function startStrataSession(config: ConfigData, profileName: string
     installationId: installation.id, installationRoot: installation.root, profileName,
     configPath: path.resolve(configPath), host: bindHost, port, pollHost: resolvePollHost(bindHost),
     logFiles: { out, err, engine, engineStart }, keySource,
+    runtimeVersion: `Strata ${inspection.sourceTag ?? inspection.sourceRevision ?? "source unknown"} / engine ${inspection.engineVersion ?? "unknown"}`,
   };
   try {
     await fs.outputJson(getSessionFile(), marker, { spaces: 2 });
@@ -505,6 +565,7 @@ function finishStop(s: ActiveSession): void {
   clearMarkerFile();
   if (active === s) active = null;
   setStrataModelView(null);
+  setStrataMetrics(null);
   host?.statusChanged();
 }
 
@@ -516,6 +577,7 @@ export async function stopStrataSession(mode: StopMode): Promise<StopResult> {
   if (!s) return { ok: true, forced: false };
   const marker = s.marker;
   s.stopping = true;
+  s.request?.abort();
   if (s.pollTimer) clearTimeout(s.pollTimer);
   setState(s, "stopping", null);
 
@@ -666,6 +728,18 @@ export function hasStrataSession(): boolean {
 
 export function isStrataInstallationInUse(installationId: string): boolean {
   return active?.marker.installationId === installationId || unverified?.marker.installationId === installationId;
+}
+
+export function setStrataPollInterval(intervalMs: number): void {
+  if (active) active.pollIntervalMs = Math.max(250, intervalMs);
+}
+
+export function getStrataProcessTarget(): {
+  pid: number; createdAt: string; executable: string; engineExecutable: string;
+} | null {
+  if (!active?.marker.engineExecutable) return null;
+  const m = active.marker;
+  return { pid: m.pid, createdAt: m.pidCreatedAt, executable: m.executable, engineExecutable: m.engineExecutable! };
 }
 
 /** Test helper: forget in-memory state without touching processes or the marker. */

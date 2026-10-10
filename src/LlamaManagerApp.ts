@@ -2,7 +2,7 @@ import type { Terminal } from "terminal-kit";
 import { setActiveTheme, setThemeMode, getThemeMode } from "./lib/theme";
 import { loadConfig, saveConfig, ConfigData } from "./lib/config";
 import { taskStore } from "./lib/tasks";
-import { stopServer, stopServerOnExit, setMaxLogLines, getStatus, detectExistingSession } from "./lib/server";
+import { stopServer, stopServerOnExit, setMaxLogLines, getStatus, detectExistingSession, setStrataPollInterval } from "./lib/server";
 import { checkForUpdate } from "./lib/updates";
 import { createUpdateInfoModal } from "./ui/specialized/UpdateInfoModal";
 import { createHelpModal } from "./ui/specialized/HelpModal";
@@ -28,13 +28,13 @@ export class LlamaManagerApp {
   async start(): Promise<void> {
     const config = await loadConfig();
     this._config = config;
+    await taskStore.init(config);
     // Detect a server left running detached by a previous "Exit Now" (or a
     // crash) so it shows as running rather than "not running" this launch.
     detectExistingSession({ monitor: true, pollIntervalMs: config.dashboard.pollIntervalMs, config });
     setActiveTheme(config.themeName);
     setThemeMode(config.themeMode);
     setMaxLogLines(config.logs.maxLogLines);
-    taskStore.init(config);
 
     this._ctx = {
       canvas: null as any,
@@ -48,6 +48,7 @@ export class LlamaManagerApp {
       setConfig: (c: ConfigData) => {
         if (this._config) {
           Object.assign(this._config, c);
+          if (c.dashboard?.pollIntervalMs !== undefined) setStrataPollInterval(c.dashboard.pollIntervalMs);
           if (c.logs?.maxLogLines !== undefined) setMaxLogLines(c.logs.maxLogLines);
           if (c.themeMode !== undefined) setThemeMode(c.themeMode);
         }

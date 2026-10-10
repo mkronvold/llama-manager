@@ -1,6 +1,7 @@
 import { Scrollable } from "../../framework/widgets/Scrollable";
 import { fg, fgBg } from "../../lib/theme";
-import { getGlobal, getSlots, onMetricsChange, type SlotMetrics } from "../../lib/metricstracker";
+import { getGlobal, getSlots, getStrataMetrics, onMetricsChange, type SlotMetrics } from "../../lib/metricstracker";
+import { taskNumber, taskRate, taskTime } from "../../lib/taskformat";
 import { formatMs, formatDraftRate, formatNum, spinnerChar, SPINNER_INTERVAL, cycleDetailLevel } from "../../lib/utils";
 import type { Color } from "../../lib/theme";
 import type { RenderContext, Size } from "../../framework/types";
@@ -17,6 +18,7 @@ const STATE_COLOR: Record<string, Color> = {
 
 const THINKING_ICON = "\u221e";
 const CONTEXT_BAR_WIDTH = 33;
+type MetricRow = { text: string; color: Color }[];
 
 function formatCtxNum(n: number): string {
   return n.toLocaleString("en-US");
@@ -86,7 +88,108 @@ export class MetricsPanel extends Scrollable {
     this.markDirty();
   }
 
+  protected strataLines(): string[] {
+    return this.strataRows().map(row => row.map(part => part.text).join(""));
+  }
+
+  protected strataRows(): MetricRow[] {
+    const view = getStrataMetrics();
+    if (!view) return [];
+    const rows: MetricRow[] = [];
+    const part = (text: string, color: Color = "textMuted") => ({ text, color });
+    const pair = (left: MetricRow, right: MetricRow): MetricRow =>
+      [...left, part(" ".repeat(Math.max(2, 42 - left.reduce((n, p) => n + p.text.length, 0))), "canvas"), ...right];
+    const age = view.receivedAt === null ? "no snapshot" : `${Math.max(0, Math.floor((Date.now() - view.receivedAt) / 1000))}s old`;
+    if (view.error) rows.push([part(`Telemetry unavailable: ${view.error} (${age}; last good data below)`, "warning")]);
+    if (view.historyError) rows.push([part(`History recovery paused: ${view.historyError}`, "warning")]);
+    if (view.missingRequests) rows.push([part(`History missing: ${view.missingRequests} completions; Tasks covers recovered rows only`, "warning")]);
+    const m = view.snapshot;
+    if (!m) return [...rows, [part("Waiting for Strata metrics")]];
+    const completePromptTimes = m.kept === m.count && m.requests.every((r) => r.evaluatedInput !== null && r.promptMs !== null);
+    const pp = completePromptTimes && m.evaluated !== null && m.promptMs !== null && m.promptMs > 0 ? m.evaluated * 1000 / m.promptMs : null;
+    const pairs = m.requests.filter((r) => r.engineOutput !== null && r.decodeMs !== null && r.decodeMs > 0);
+    const engineCount = pairs.reduce((sum, r) => sum + r.engineOutput!, 0);
+    const decodeMs = pairs.reduce((sum, r) => sum + r.decodeMs!, 0);
+    const tg = decodeMs > 0 ? engineCount * 1000 / decodeMs : null;
+    const summary = [part("Session  Tasks "), part(String(m.count), "accent"), part("  ·  PP "), part(taskRate(pp), "info"),
+      part("  ·  TG (history) "), part(taskRate(tg), "success")];
+    if (this._detailLevel !== "basic") summary.push(part("  ·  Tokens "), part(taskNumber(m.evaluated), "info"),
+      part(" / "), part(taskNumber(m.output), "success"));
+    rows.push(summary);
+    const draft = m.draftsAccepted !== null && m.draftsOffered !== null && m.draftsOffered > 0
+      ? `${(m.draftsAccepted * 100 / m.draftsOffered).toFixed(1)}%` : "n/a";
+    if (this._detailLevel !== "basic") {
+      rows.push([part("  Draft "), part(draft, "accentColor"), part("  ·  Active "),
+        part(taskNumber(m.live.running ?? (m.live.slots.length
+          ? m.live.slots.filter(s => s.state !== "idle").length
+          : m.live.state === "reading" || m.live.state === "generating" ? 1 : 0)), "warning"),
+        part(`  ·  Queue ${taskNumber(m.live.queued)}`),
+        ...(m.live.parallel !== null ? [part(`  ·  Parallel ${m.live.parallel}`)] : []),
+        ...(m.live.waiting !== null ? [part(`  ·  Waiting ${m.live.waiting}`)] : []),
+        part(`  ·  TG coverage ${pairs.length}/${m.count}  ·  ${age}`)]);
+    }
+    rows.push([]);
+    const latest = m.requests[m.requests.length - 1];
+    const slots = [...m.live.slots].sort((a, b) => a.slot - b.slot);
+    // Stock history has no completed-slot identity. Only the service block can
+    // retain the latest completion; never attach it to a sampled parallel slot.
+    const activities = slots.length ? slots.map(s => ({
+      label: `Slot ${s.slot}`, state: s.state, prompt: s.promptTokens, generated: s.generated,
+      rate: s.rate, elapsed: s.elapsedSeconds, service: false,
+    })) : [{ label: "Service", state: m.live.state, prompt: m.live.promptRead, generated: m.live.generated,
+      rate: m.live.rate, elapsed: m.live.elapsedSeconds, service: true }];
+    for (const activity of activities) {
+      if (rows[rows.length - 1]!.length) rows.push([]);
+      const prompting = activity.state === "reading";
+      const generating = activity.state === "generating" || activity.state === "decoding";
+      const idle = !prompting && !generating;
+      const last = activity.service ? latest : undefined;
+      const promptRate = activity.service ? (!idle ? m.live.promptRate :
+        last && last.evaluatedInput !== null && last.promptMs !== null && last.promptMs > 0
+          ? last.evaluatedInput * 1000 / last.promptMs : null) : null;
+      const genRate = generating ? activity.rate : idle ? last?.decodeRate ?? null : null;
+      const header = [part(`${activity.label}  `), part(`${idle ? "\u25cb" : spinnerChar()} ${prompting ? "prompting" : generating ? "generating" : activity.state}`,
+        prompting ? "warning" : generating ? "success" : "textMuted")];
+      if (idle && last) header.push(part("  Last task #"), part(String(last.ordinal), "text"), part(`  ${last.finish ?? "n/a"}`));
+      const speeds = pair([part("  PP   "), part(taskRate(promptRate), "info")],
+        [part("TG   "), part(taskRate(genRate), "success"),
+          ...(generating && activity.generated !== null ? [part(` (${activity.generated} tok)`)] : [])]);
+      if (this._detailLevel === "basic") {
+        rows.push([...header, part("  ·  PP "), part(taskRate(promptRate), "info"), part("  ·  TG "), part(taskRate(genRate), "success")]);
+        continue;
+      }
+      rows.push(header);
+      const progress = activity.service && prompting && m.live.promptTotal !== null && m.live.promptTotal > 0 && activity.prompt !== null
+        ? ` (${Math.min(100, activity.prompt * 100 / m.live.promptTotal).toFixed(0)}%)` : "";
+      rows.push([part(idle ? "  In   " : "  Prompt "), part(taskNumber(idle && last ? last.evaluatedInput : activity.prompt), "info"),
+        part(activity.service && prompting ? ` / ${taskNumber(m.live.promptTotal)}${progress} processed` : ""),
+        part(idle ? "  ·  Out " : "  ·  Generated "), part(taskNumber(idle && last ? last.output : activity.generated), "success")]);
+      rows.push(speeds);
+      if (this._detailLevel === "detailed" && !idle) rows.push([part(`  Elapsed ${activity.elapsed === null ? "n/a" : `${activity.elapsed}s`}`)]);
+      if (this._detailLevel === "detailed" && last) {
+        const acceptance = last.draftsAccepted !== null && last.draftsOffered !== null && last.draftsOffered > 0
+          ? `${(last.draftsAccepted * 100 / last.draftsOffered).toFixed(1)}% (${last.draftsAccepted}/${last.draftsOffered})` : "n/a";
+        if (!idle) rows.push([part(`  Last task #${last.ordinal}  ${last.finish ?? "n/a"}`)]);
+        rows.push(pair([part("  Time "), part(taskTime(last.totalMs), "text")],
+          [part("Draft "), part(acceptance, "accentColor")]));
+        rows.push([part(`  Last #${last.ordinal}  PT ${taskTime(last.promptMs)}  ET ${taskTime(last.decodeMs)}  Wall ${taskTime(last.wallMs)}  Finish ${last.finish ?? "n/a"}`)]);
+        rows.push([part(`  Last input ${taskNumber(last.requestedInput)}  Cached ${taskNumber(last.cachedInput)}  In ${taskNumber(last.evaluatedInput)}  Out ${taskNumber(last.output)}  Engine ${taskNumber(last.engineOutput)}`)]);
+      }
+    }
+    if (slots.length && latest && this._detailLevel !== "basic") {
+      rows.push([], [part(`Last service completion #${latest.ordinal} (slot unavailable)  ${latest.finish ?? "n/a"}`)],
+        pair([part("  PP   "), part(taskRate(latest.evaluatedInput !== null && latest.promptMs !== null && latest.promptMs > 0 ? latest.evaluatedInput * 1000 / latest.promptMs : null), "info")],
+          [part("TG   "), part(taskRate(latest.decodeRate), "success")]),
+        [part(`  In ${taskNumber(latest.evaluatedInput)}  Out ${taskNumber(latest.output)}  Time ${taskTime(latest.totalMs)}`)]);
+    }
+    return rows;
+  }
+
   measure(parentSize?: Size): Size {
+    if (getStrataMetrics()) {
+      return { width: parentSize?.width ?? this.rect.width,
+        height: Math.min(this.strataLines().length, parentSize?.height ?? 999) };
+    }
     const slots = getSlots();
     const global = getGlobal();
     const numSlots = slots.length;
@@ -102,6 +205,23 @@ export class MetricsPanel extends Scrollable {
   }
 
   draw(ctx: RenderContext): void {
+    if (getStrataMetrics()) {
+      const rows = this.strataRows();
+      this.contentHeight = rows.length;
+      for (let row = 0; row < this.rect.height; row++) {
+        const parts = rows[this.scrollOffset + row];
+        if (parts === undefined) break;
+        ctx.canvas.moveTo(this.rect.x, this.rect.y + row);
+        let remaining = this.contentWidth;
+        for (const part of parts) {
+          fg(ctx.canvas, part.color, part.text.slice(0, remaining));
+          remaining = Math.max(0, remaining - part.text.length);
+          if (!remaining) break;
+        }
+      }
+      if (this.needsScrollbar) this.drawScrollbar(ctx.canvas, this.rect.x + this.contentWidth, this.rect.y, this._scrollbarWidth, this.rect.height);
+      return;
+    }
     const { canvas } = ctx;
     const { x, y } = this.rect;
     const viewportH = this.rect.height;

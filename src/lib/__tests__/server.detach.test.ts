@@ -20,6 +20,7 @@ describe("detached session reattach", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (originalEnv === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = originalEnv;
     await fs.remove(tmpDir).catch(() => {});
@@ -79,6 +80,33 @@ describe("detached session reattach", () => {
     expect(getStatus().running).toBe(false);
     expect(await fs.pathExists(getSessionFile())).toBe(false);
   });
+
+  it("reattaches scoped llama logs from the launch offset, excluding old-session tasks", async () => {
+    vi.stubEnv("XDG_CONFIG_HOME", tmpDir);
+    vi.stubEnv("XDG_DATA_HOME", path.join(tmpDir, "data"));
+    const { getSessionFile, loadConfig } = await import("../config");
+    const { taskStore } = await import("../tasks");
+    const server = await import("../server");
+    const config = await loadConfig();
+    config.tasksFile = path.join(tmpDir, "tasks.jsonl");
+    config.server.logFile = path.join(tmpDir, "missing.log");
+    await taskStore.init(config);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {},1000)"], { stdio: "ignore", detached: true });
+    child.unref();
+    try {
+      const logFile = path.join(tmpDir, "scoped.log");
+      const old = "slot release: id 0 | task 7 | stop processing: n_tokens = 20, truncated = 0\n";
+      await fs.writeFile(logFile, old + "slot release: id 0 | task 1 | stop processing: n_tokens = 30, truncated = 0\n");
+      await fs.outputJson(getSessionFile(), { pid: child.pid, startedAt: Date.now(),
+        activeVersion: "test", logFile, logStart: Buffer.byteLength(old), sessionId: "scoped", profileName: "frozen" });
+      server.detectExistingSession({ config });
+      expect(taskStore.getRange(0, 10)).toHaveLength(1);
+      expect(taskStore.getRange(0, 10)[0]).toMatchObject({ taskId: 1, sourceSession: "scoped", profile: "frozen" });
+    } finally {
+      await server.stopServer();
+      taskStore.dispose();
+    }
+  }, 20_000);
 
   it("backfills log lines/model info from disk on reattach and keeps tailing new lines", async () => {
     const { getSessionFile } = await import("../config");

@@ -1,13 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "fs-extra";
 import {
   buildStrataEnvironment, checkIdentity, deriveStrataState, descendantsOf, isRecordGone,
   parseProcessSnapshot, parseStrataStatus, resolvePollHost, resolveStrataApiKey,
+  fetchStrataMetrics,
 } from "../strataservice";
 import type { ProcessRecord } from "../strataservice";
 import { createFileTail } from "../logtail";
+import { metricsFixture } from "./fixtures/stratametrics";
 
 const rec = (pid: number, ppid: number, createdAt: string, name = "python.exe", executable = `C:\\x\\${name}`): ProcessRecord =>
   ({ pid, ppid, createdAt, name, executable });
@@ -75,6 +77,30 @@ describe("Strata service helpers", () => {
     expect(deriveStrataState({ stopping: false, httpSeen: true, poll: ok(false) }).state).toBe("unloaded");
     expect(deriveStrataState({ stopping: false, httpSeen: true, poll: { kind: "unauthorized" } }).detail).toMatch(/API key/);
     expect(deriveStrataState({ stopping: true, httpSeen: true, poll: ok(true) }).state).toBe("stopping");
+  });
+});
+
+describe("stock metrics HTTP", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("uses requests=all, auth, abort signal and manual redirects", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(metricsFixture()));
+    const controller = new AbortController();
+    expect((await fetchStrataMetrics("http://127.0.0.1:1234", "test-key", controller.signal)).count).toBe(1);
+    expect(fetcher).toHaveBeenCalledWith("http://127.0.0.1:1234/metrics?requests=all",
+      expect.objectContaining({ headers: { Authorization: "Bearer test-key" }, redirect: "manual", signal: expect.any(AbortSignal) }));
+  });
+
+  it.each([401, 403, 302, 500])("surfaces HTTP %i without success fallback", async (status) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status }));
+    await expect(fetchStrataMetrics("http://127.0.0.1:1234", null, new AbortController().signal)).rejects.toThrow();
+  });
+
+  it("rejects malformed bodies and transport errors", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));
+    await expect(fetchStrataMetrics("http://127.0.0.1:1234", null, new AbortController().signal)).rejects.toThrow(/totals/);
+    fetcher.mockRejectedValue(new Error("unreachable"));
+    await expect(fetchStrataMetrics("http://127.0.0.1:1234", null, new AbortController().signal)).rejects.toThrow("unreachable");
   });
 });
 

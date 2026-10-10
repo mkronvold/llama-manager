@@ -4,7 +4,7 @@ import { Section } from "../../framework/widgets/Section";
 import { fg, fgBg } from "../../lib/theme";
 import { formatSize } from "../../lib/utils";
 import { getSystemSnapshot } from "../../lib/systeminfo";
-import { getStatus } from "../../lib/server";
+import { getStatus, getStrataProcessTarget } from "../../lib/server";
 import type { GpuTelemetrySourceSnapshot, SystemSnapshot } from "../../lib/systeminfo";
 import type { Color } from "../../lib/theme";
 import type { TabContext } from "../../lib/tabcontext";
@@ -108,6 +108,7 @@ class SystemPanel extends Control {
     if (snap.systemwideTotalBytes) lines += 2;
     // Model residency: blank + heading + 3 bars
     if (snap.residency) lines += 5;
+    else if (snap.residencyStatus) lines += 2;
     // Memory pressure: blank + commit bar + available + paging
     if (snap.pressure) lines += 4;
     return lines;
@@ -132,12 +133,8 @@ class SystemPanel extends Control {
   }
 
   protected refresh(): void {
-    // The residency breakdown is per-process, so the running server's PID is
-    // passed down and folded into the same counter query.
-    // Strata's PID is the Python supervisor, not the engine holding the model,
-    // so residency would be misattributed; engine attribution arrives with telemetry.
     const status = getStatus();
-    const serverPid = status.runtime === "llama" ? status.pid : null;
+    const serverPid = status.runtime === "llama" ? status.pid : getStrataProcessTarget();
     getSystemSnapshot(this._ctx?.getConfig(), serverPid).then((snapshot) => {
       if (this._destroyed) return;
       this._snapshot = snapshot;
@@ -283,6 +280,11 @@ class SystemPanel extends Control {
     }
 
     const res = snap.residency;
+    if (!res && snap.residencyStatus) {
+      cy++;
+      canvas.moveTo(x, cy++);
+      fg(canvas, "textMuted", snap.residencyStatus.slice(0, this.rect.width));
+    }
     if (res) {
       const total = res.committedBytes || 1;
       const pct = (bytes: number) => `${Math.round((bytes / total) * 100)}%`;
@@ -290,7 +292,7 @@ class SystemPanel extends Control {
       canvas.moveTo(x, cy);
       fg(canvas, "textMuted", "Model residency".padEnd(labelWidth));
       fg(canvas, "text", formatSize(res.committedBytes));
-      fg(canvas, "textMuted", `  committed by PID ${res.pid}`);
+      fg(canvas, "textMuted", `  committed by ${res.pids ? `engine PIDs ${res.pids.join(", ")}` : `PID ${res.pid}`}`);
       cy++;
 
       const drawPart = (label: string, bytes: number, color: Color) => {

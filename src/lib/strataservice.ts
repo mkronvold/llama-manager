@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import fs from "fs-extra";
+import { parseStrataMetrics, type StrataMetrics } from "./stratametrics";
 
 const execFileAsync = promisify(execFile);
 
@@ -280,10 +281,10 @@ export function parseStrataStatus(body: unknown): StrataLiveStatus {
   };
 }
 
-export async function fetchStrataStatus(baseUrl: string, key: string | null, timeoutMs = 5000): Promise<StrataPollResult> {
+export async function fetchStrataStatus(baseUrl: string, key: string | null, timeoutMs = 5000, signal?: AbortSignal): Promise<StrataPollResult> {
   try {
     const res = await fetch(`${baseUrl}/v1/status`, {
-      headers: authHeaders(key), redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
+      headers: authHeaders(key), redirect: "manual", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 401 || res.status === 403) return { kind: "unauthorized" };
     if (res.status !== 200) return { kind: "http-error", status: res.status };
@@ -291,6 +292,17 @@ export async function fetchStrataStatus(baseUrl: string, key: string | null, tim
   } catch (error) {
     return { kind: "unreachable", error: errorText(error) };
   }
+
+}
+
+export async function fetchStrataMetrics(baseUrl: string, key: string | null, signal: AbortSignal): Promise<StrataMetrics> {
+  const res = await fetch(`${baseUrl}/metrics?requests=all`, {
+    headers: authHeaders(key), redirect: "manual",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
+  });
+  if (res.status === 401 || res.status === 403) throw new Error("Strata metrics rejected the API key");
+  if (res.status !== 200) throw new Error(`Strata metrics failed (HTTP ${res.status})`);
+  return parseStrataMetrics(await res.json());
 }
 
 export type StrataUnloadResult =

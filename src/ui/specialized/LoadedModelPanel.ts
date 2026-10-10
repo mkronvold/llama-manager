@@ -369,6 +369,9 @@ export interface StrataModelView {
   /** When set, the state label shows elapsed time since this epoch ms. */
   since: number | null;
   detail: string | null;
+  requestedSpec?: string | null;
+  reported?: { context: number | null; kv: string | null; spec: number | null } | null;
+  reportedStale?: boolean;
 }
 
 let strataView: StrataModelView | null = null;
@@ -436,7 +439,7 @@ export class LoadedModelPanel extends Control {
     if (!strataView) return 0;
     if (this._detailLevel === "basic") return 1;
     if (this._detailLevel === "middle") return 2;
-    return strataView.detail ? 3 : 2;
+    return 2 + (strataView.reported ? 1 : 0) + (strataView.detail ? 1 : 0);
   }
 
   protected drawStrata(ctx: RenderContext, view: StrataModelView): void {
@@ -464,8 +467,15 @@ export class LoadedModelPanel extends Control {
       fg(canvas, "text", view.kv);
     }
     fg(canvas, "textMuted", `  ·  key: ${view.keySource}`);
-    if (rows < 3 || !view.detail) return;
-    canvas.moveTo(x, y + 2);
+    let row = 2;
+    if (view.reported && rows > row) {
+      canvas.moveTo(x, y + row++);
+      fg(canvas, "textMuted", `  ${view.reportedStale ? "Last reported (stale)" : "Reported"} Ctx ${view.reported.context === null ? "n/a" : fmtCtx(view.reported.context)} (requested ${view.context ?? "n/a"})`);
+      fg(canvas, "textMuted", `  KV ${view.reported.kv ?? "n/a"} (requested ${view.kv ?? "n/a"})`);
+      fg(canvas, "textMuted", `  Spec ${view.reported.spec ?? "n/a"} (requested ${view.requestedSpec ?? "n/a"})`);
+    }
+    if (rows <= row || !view.detail) return;
+    canvas.moveTo(x, y + row);
     const text = `  ${view.detail}`;
     fg(canvas, "textMuted", text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text);
   }

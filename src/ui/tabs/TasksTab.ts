@@ -11,6 +11,7 @@ import { TaskChartsControl } from "../specialized/TaskChartsSection";
 import { focusManager } from "../../framework/FocusManager";
 import { fireAsync, formatMs, formatDate, formatTime } from "../../lib/utils";
 import { taskStore, TaskMetrics, TaskSortField, TaskSortDir } from "../../lib/tasks";
+import { taskNumber, taskRate, taskTime } from "../../lib/taskformat";
 import type { TabContext } from "../../lib/tabcontext";
 import type { Point, Size, RenderContext } from "../../framework/types";
 
@@ -71,33 +72,42 @@ class TaskDetailsControl extends Section {
   _getLines(): { label: string; value: string; color?: string }[] {
     if (!this._task) return [{ label: "No selection", value: "" }];
     const task = this._task;
-    const timeStr = formatTime(task.timestamp);
-    const dateStr = formatDate(task.timestamp);
+    const timeStr = task.timestamp === null ? "n/a" : formatTime(task.timestamp);
+    const dateStr = task.timestamp === null ? "n/a" : formatDate(task.timestamp);
 
     return [
       { label: "ID", value: `#${task.taskId}` },
-      { label: "Slot", value: `S${task.slotId}` },
+      { label: "Slot", value: task.slotId === null ? "n/a" : `S${task.slotId}` },
       { label: "Date", value: dateStr },
       { label: "Time", value: timeStr },
       { label: "", value: "" },
       { label: "Profile", value: task.profile || "-" },
       { label: "Model", value: task.model || "-" },
       { label: "Version", value: task.version || "-" },
+      { label: "Runtime", value: task.runtime },
+      { label: "Session", value: task.sourceSession },
+      { label: "Finish", value: task.finishReason ?? "n/a" },
       { label: "", value: "" },
-      { label: "Prompt Tokens", value: task.promptTokens.toLocaleString(), color: "info" },
-      { label: "Prompt Time", value: formatMs(task.promptTimeMs) },
-      { label: "Prompt Speed", value: `${task.promptSpeed.toFixed(1)} t/s`, color: "info" },
+      { label: "In (evaluated)", value: taskNumber(task.promptTokens), color: "info" },
+      { label: "Input total", value: taskNumber(task.requestedInput) },
+      { label: "Input processed", value: taskNumber(task.processedInput) },
+      { label: "Input cached", value: taskNumber(task.cachedInput) },
+      { label: "Prompt Time", value: taskTime(task.promptTimeMs) },
+      { label: "Prompt Speed", value: taskRate(task.promptSpeed), color: "info" },
       { label: "", value: "" },
-      { label: "Output Tokens", value: task.outputTokens.toLocaleString(), color: "success" },
-      { label: "Eval Time", value: formatMs(task.evalTimeMs) },
-      { label: "Output Speed", value: `${task.outputSpeed.toFixed(1)} t/s`, color: "success" },
+      { label: "Output Tokens", value: taskNumber(task.outputTokens), color: "success" },
+      { label: "Engine Tokens", value: taskNumber(task.engineOutput) },
+      { label: "Eval Time", value: taskTime(task.evalTimeMs) },
+      { label: "Output Speed", value: taskRate(task.outputSpeed), color: "success" },
       { label: "", value: "" },
-      { label: "Total Tokens", value: task.totalTokens.toLocaleString() },
-      { label: "Total Time", value: formatMs(task.totalTimeMs) },
+      { label: "Total Tokens", value: taskNumber(task.totalTokens) },
+      { label: "Total Time", value: taskTime(task.totalTimeMs) },
+      { label: "Wall Time", value: taskTime(task.wallTimeMs) },
       { label: "", value: "" },
-      { label: "Draft Accept", value: `${(task.draftAcceptance * 100).toFixed(1)}% (${task.draftAccepted}/${task.draftGenerated})`, color: "accentColor" },
-      { label: "Context Size", value: task.contextSize.toLocaleString() },
-      { label: "Truncated", value: task.truncated ? "Yes" : "No" },
+      { label: "Draft Accept", value: task.draftAcceptance === null ? "n/a" : `${(task.draftAcceptance * 100).toFixed(1)}% (${task.draftAccepted}/${task.draftGenerated})`, color: "accentColor" },
+      { label: "Context Size", value: taskNumber(task.contextSize) },
+      { label: "Truncated", value: task.truncated === null ? "n/a" : task.truncated ? "Yes" : "No" },
+      { label: "History gaps", value: taskStore.getHistoryGaps().filter((g) => g.sessionId === task.sourceSession).map((g) => `#${g.first}-#${g.last}`).join(", ") || "none" },
     ];
   }
 
@@ -237,7 +247,7 @@ export class TasksControl extends Control {
       this._table.setVirtualLoader(total, (start, end) => {
         const tasks = taskStore.getRange(start, end - start, undefined, this._sortField, this._sortDir);
         return tasks.map((t) => ({
-          id: t.taskId,
+          id: t.rowId ?? `${t.sourceSession}:${t.taskId}`,
           label: "",
           data: t,
         }));
@@ -258,14 +268,17 @@ export class TasksControl extends Control {
     const statsText = this._summary.builder
       .muted("Tasks ")
       .accentColor(`${stats.count}`)
-      .muted("  Prompt ")
-      .info(`${stats.totalPromptTokens.toLocaleString()}`)
-      .muted("  Output ")
-      .success(`${stats.totalOutputTokens.toLocaleString()}`)
+      .muted(taskStore.getHistoryGapCount() ? `  Missing history ${taskStore.getHistoryGapCount()}` : "")
+      .muted("  Known In ")
+      .info(taskNumber(stats.totalPromptTokens))
+      .muted("  Known Out ")
+      .success(taskNumber(stats.totalOutputTokens))
       .muted("  Avg PP ")
-      .info(`${stats.avgPromptSpeed.toFixed(1)} t/s`)
+      .info(taskRate(stats.avgPromptSpeed))
       .muted("  Avg TG ")
-      .success(`${stats.avgOutputSpeed.toFixed(1)} t/s`);
+      .success(taskRate(stats.avgOutputSpeed))
+      .muted(`  Measured PP/TG ${stats.promptMeasured}/${stats.outputMeasured} of ${stats.count}`)
+      .muted(`  Known In/Out rows ${stats.inputKnown}/${stats.outputKnown}`);
 
     const help = this._view === "table" ? "c charts  h sidebar  s sort  r reverse" : "c table  b day/hour";
     const statsLen = this._summary.segments.reduce((a, s) => a + s.text.length, 0);
@@ -277,15 +290,15 @@ export class TasksControl extends Control {
     const sortIndicator = this._sortDir === "asc" ? "▲" : "▼";
 
     const columns: TableColumn[] = [
-      { label: "Date", width: 6, align: "left" as const, headerSuffix: this._sortField === "timestamp" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => formatDate(r.timestamp).slice(5) },
-      { label: "Time", width: 8, align: "left" as const, format: (_c, r: TaskMetrics) => formatTime(r.timestamp) },
+      { label: "Date", width: 6, align: "left" as const, headerSuffix: this._sortField === "timestamp" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => r.timestamp === null ? "n/a" : formatDate(r.timestamp).slice(5) },
+      { label: "Time", width: 8, align: "left" as const, format: (_c, r: TaskMetrics) => r.timestamp === null ? "n/a" : formatTime(r.timestamp) },
       { label: "ID", width: 6, align: "right" as const, headerSuffix: this._sortField === "taskId" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => `#${r.taskId}` },
-      { label: "Slot", width: 4, align: "left" as const, headerSuffix: this._sortField === "slotId" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => `S${r.slotId}` },
+      { label: "Slot", width: 4, align: "left" as const, headerSuffix: this._sortField === "slotId" ? sortIndicator : undefined, format: (_c, r: TaskMetrics) => r.slotId === null ? "n/a" : `S${r.slotId}` },
       { label: "Profile", width: 8, flex: 1, align: "left" as const, format: (_c, r: TaskMetrics) => r.profile || "-" },
-      { label: "PP", width: 10, align: "right" as const, headerSuffix: this._sortField === "promptSpeed" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => `${r.promptSpeed.toFixed(1)} t/s` },
-      { label: "TG", width: 10, align: "right" as const, headerSuffix: this._sortField === "outputSpeed" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => `${r.outputSpeed.toFixed(1)} t/s` },
-      { label: "In", width: 8, align: "right" as const, headerSuffix: this._sortField === "promptTokens" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => String(r.promptTokens) },
-      { label: "Out", width: 8, align: "right" as const, headerSuffix: this._sortField === "outputTokens" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => String(r.outputTokens) },
+      { label: "PP", width: 10, align: "right" as const, headerSuffix: this._sortField === "promptSpeed" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => taskRate(r.promptSpeed) },
+      { label: "TG", width: 10, align: "right" as const, headerSuffix: this._sortField === "outputSpeed" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => taskRate(r.outputSpeed) },
+      { label: "In", width: 8, align: "right" as const, headerSuffix: this._sortField === "promptTokens" ? sortIndicator : undefined, color: "info", format: (_c, r: TaskMetrics) => taskNumber(r.promptTokens) },
+      { label: "Out", width: 8, align: "right" as const, headerSuffix: this._sortField === "outputTokens" ? sortIndicator : undefined, color: "success", format: (_c, r: TaskMetrics) => taskNumber(r.outputTokens) },
     ];
 
     if (this._detailsVisible) {
@@ -294,18 +307,18 @@ export class TasksControl extends Control {
         width: 8,
         align: "right" as const,
         headerSuffix: this._sortField === "totalTimeMs" ? sortIndicator : undefined,
-        format: (_c, r: TaskMetrics) => formatMs(r.totalTimeMs),
+        format: (_c, r: TaskMetrics) => taskTime(r.totalTimeMs),
       });
     } else {
       columns.push(
-        { label: "PT", width: 8, align: "right" as const, format: (_c, r: TaskMetrics) => formatMs(r.promptTimeMs) },
-        { label: "ET", width: 8, align: "right" as const, format: (_c, r: TaskMetrics) => formatMs(r.evalTimeMs) },
+        { label: "PT", width: 8, align: "right" as const, format: (_c, r: TaskMetrics) => taskTime(r.promptTimeMs) },
+        { label: "ET", width: 8, align: "right" as const, format: (_c, r: TaskMetrics) => taskTime(r.evalTimeMs) },
         {
           label: "TT",
           width: 8,
           align: "right" as const,
           headerSuffix: this._sortField === "totalTimeMs" ? sortIndicator : undefined,
-          format: (_c, r: TaskMetrics) => formatMs(r.totalTimeMs),
+          format: (_c, r: TaskMetrics) => taskTime(r.totalTimeMs),
         },
       );
     }
