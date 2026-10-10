@@ -792,19 +792,19 @@ if ($targetPid -gt 0) {
     $buckets['PROC'] += "private,$($proc.PrivateMemorySize64)"
     $buckets['PROC'] += "workingset,$($proc.WorkingSet64)"
   }
-  if ($native) {
-    foreach ($line in $before) {
-      $parts = $line -split '\\|',5
-      if ($parts.Count -eq 5 -and $parts[4] -ieq $nativeTarget.engineExecutable) {
-        $proc = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
-        if ($proc) {
-          $buckets['PROC'] += "$($parts[0])|private,$($proc.PrivateMemorySize64)"
-          $buckets['PROC'] += "$($parts[0])|workingset,$($proc.WorkingSet64)"
-        }
+}
+if ($native) {
+  foreach ($line in $before) {
+    $parts = $line -split '\\|',5
+    if ($parts.Count -eq 5 -and $parts[4] -ieq $nativeTarget.engineExecutable) {
+      $proc = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
+      if ($proc) {
+        $buckets['PROC'] += "$($parts[0])|private,$($proc.PrivateMemorySize64)"
+        $buckets['PROC'] += "$($parts[0])|workingset,$($proc.WorkingSet64)"
       }
     }
-    $buckets['SNAP_AFTER'] = @(ProcessSnapshot)
   }
+  $buckets['SNAP_AFTER'] = @(ProcessSnapshot)
 }
 foreach ($key in $buckets.Keys) {
   "---$key---"

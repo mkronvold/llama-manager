@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildNativeResidency, buildWindowsCounterScript } from "../systeminfo";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
-import type { ProcessRecord } from "../strataservice";
+import { parseProcessSnapshot, type ProcessRecord } from "../strataservice";
 
 const date = "2026-10-10T00:00:00.000Z";
 const target = { pid: 10, createdAt: date, executable: "C:\\strata\\python.exe", engineExecutable: "C:\\strata\\strata.exe" };
@@ -56,5 +56,34 @@ describe("native Strata memory attribution", () => {
     expect(result.stdout + result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(script).toContain("-split '\\|',5");
+  });
+
+  it.skipIf(os.platform() !== "win32")("executes native collection independently of the numeric llama PID branch", () => {
+    const mocks = `
+$ProgressPreference = 'SilentlyContinue'
+function Get-CimInstance {
+  foreach ($id in @(10,12)) {
+    [pscustomobject]@{ ProcessId=$id; ParentProcessId=10; CreationDate=[datetime]'${date}';
+      Name=$(if ($id -eq 10) { 'python.exe' } else { 'strata.exe' });
+      ExecutablePath=$(if ($id -eq 10) { '${target.executable}' } else { '${target.engineExecutable}' }) }
+  }
+}
+function Get-Process { param($Id) [pscustomobject]@{ PrivateMemorySize64=1000; WorkingSet64=400 } }
+function Get-Counter { [pscustomobject]@{ CounterSamples=@() } }
+`;
+    const script = mocks + buildWindowsCounterScript(target);
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const section = (name: string) => result.stdout.split(`---${name}---`)[1]!.split("---")[0]!.trim();
+    expect(parseProcessSnapshot(section("SNAP_BEFORE"))).toHaveLength(2);
+    expect(parseProcessSnapshot(section("SNAP_AFTER"))).toHaveLength(2);
+    expect(section("PROC").split(/\r?\n/)).toEqual(["12|private,1000", "12|workingset,400"]);
+    expect(buildNativeResidency(target, parseProcessSnapshot(section("SNAP_BEFORE")),
+      parseProcessSnapshot(section("SNAP_AFTER")), section("PROC").split(/\r?\n/),
+      ["pid_12_luid_0x0_0x1_phys_0,200"], ["pid_12_luid_0x0_0x1_phys_0,100"]))
+      .toMatchObject({ pids: [12], committedBytes: 1000, workingSetBytes: 400 });
   });
 });
