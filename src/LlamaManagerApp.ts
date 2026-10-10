@@ -2,7 +2,7 @@ import type { Terminal } from "terminal-kit";
 import { setActiveTheme, setThemeMode, getThemeMode } from "./lib/theme";
 import { loadConfig, saveConfig, ConfigData } from "./lib/config";
 import { taskStore } from "./lib/tasks";
-import { stopServer, setMaxLogLines, getStatus, detectExistingSession } from "./lib/server";
+import { stopServer, stopServerOnExit, setMaxLogLines, getStatus, detectExistingSession } from "./lib/server";
 import { checkForUpdate } from "./lib/updates";
 import { createUpdateInfoModal } from "./ui/specialized/UpdateInfoModal";
 import { createHelpModal } from "./ui/specialized/HelpModal";
@@ -30,7 +30,7 @@ export class LlamaManagerApp {
     this._config = config;
     // Detect a server left running detached by a previous "Exit Now" (or a
     // crash) so it shows as running rather than "not running" this launch.
-    detectExistingSession();
+    detectExistingSession({ monitor: true, pollIntervalMs: config.dashboard.pollIntervalMs, config });
     setActiveTheme(config.themeName);
     setThemeMode(config.themeMode);
     setMaxLogLines(config.logs.maxLogLines);
@@ -223,9 +223,13 @@ export class LlamaManagerApp {
       const stoppingModal = createStoppingServerModal();
       modalManager.open(stoppingModal);
       if (this._main) this._main.markAllDirty();
-      await stopServer();
+      const result = await stopServer({ mode: "force-on-failure" });
       modalManager.close();
       if (this._main) this._main.markAllDirty();
+      if (!result.ok) {
+        this.showMessage(`Stop failed, not exiting: ${result.reason}`);
+        return;
+      }
       this.quit();
     }
   }
@@ -252,7 +256,7 @@ export class LlamaManagerApp {
     this.term.styleReset();
     const cfg = this._config;
     if (cfg?.dashboard.killServerOnExit) {
-      stopServer().catch(() => {});
+      stopServerOnExit();
     }
   }
 

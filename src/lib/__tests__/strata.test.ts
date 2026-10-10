@@ -72,9 +72,9 @@ describe("Strata registration and inspection", () => {
     await fs.remove(temp);
   });
 
-  it("keeps upstream settings ownership and disables Strata lifecycle", () => {
+  it("keeps upstream settings ownership and enables Strata lifecycle", () => {
     expect(getRuntimeAdapter("strata").capabilities).toMatchObject({
-      lifecycleAvailable: false, settingsOwner: "upstream", telemetry: "json-api",
+      lifecycleAvailable: true, settingsOwner: "upstream", telemetry: "json-api",
       modelSelection: false, listDevices: false,
     });
     expect(getRuntimeAdapter("llama-compatible").capabilities.lifecycleAvailable).toBe(true);
@@ -173,7 +173,7 @@ describe("Strata registration and inspection", () => {
     vi.spyOn(os, "platform").mockReturnValue("win32");
     await registerStrataInstallation(config, root, runner);
     const id = strataVersionId(config.strataInstallations![0]!.id);
-    await expect(switchVersion(config, id)).rejects.toThrow("inspection only");
+    await expect(switchVersion(config, id)).rejects.toThrow("start Strata through a Strata profile");
     await uninstallVersion(config, id);
     expect(config.strataInstallations).toEqual([]);
     expect(await fs.pathExists(path.join(root, "pack", "dense.bin"))).toBe(true);
@@ -185,7 +185,7 @@ describe("Strata registration and inspection", () => {
     const { buildArgs, startServer, getStatus } = await import("../server");
     config.activeVersion = strataVersionId("test");
     expect(() => buildArgs(config, path.join(temp, "unused.log"))).toThrow("does not accept");
-    await expect(startServer(config)).rejects.toThrow("lifecycle support");
+    await expect(startServer(config)).rejects.toThrow("start Strata through a Strata profile");
     expect(getStatus().running).toBe(false);
     expect(await fs.pathExists(path.join(temp, "state", "session.json"))).toBe(false);
   });

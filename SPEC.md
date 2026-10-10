@@ -556,7 +556,7 @@ Configurable via `config.defaultFork` (default: `llama.cpp`). Controls which for
 
 Lists installed versions across all supported forks and provides fork-aware install/switch/uninstall actions.
 
-#### Windows Strata registration and profiles (implemented; lifecycle pending)
+#### Windows Strata registration and profiles
 
 Strata is a separate runtime, not a llama.cpp fork. Versions can register an
 existing source root as an external installation. Each has a stable manager ID
@@ -578,9 +578,9 @@ exist. Enter shows inspection, not active-version selection. Unregister preserve
 the complete installation and all model data regardless of ownership, and its
 confirmation lists profiles bound to the installation. Generic
 Update rejects Strata and Update All excludes it with an explanation. The typed
-runtime boundary identifies upstream-owned settings and JSON telemetry, but its
-Strata lifecycle capability remains disabled. Start/Stop/resume, logs, metrics
-and managed setup/update are later phases; no Strata launch is wired yet.
+runtime boundary identifies upstream-owned settings and JSON telemetry and enables
+the Strata lifecycle (below). Metrics/tasks and managed setup/update are later
+phases.
 
 Profiles: `ServerProfile.strata?: { installationId: string; configPath: string | null }`.
 Absent means a llama-compatible profile (unchanged behavior). `loadConfig`
@@ -606,15 +606,62 @@ starting, running, exited, then completed / failed (non-zero exit or launch
 failure) / abandoned (wrapper gone without exit code, or no PID within 120 s) /
 incomplete (Configure exit 0 without a usable config after revalidation).
 Configure is exclusive per installation and blocked by a running-service hook
-(stubbed until lifecycle exists); Check is blocked only by Configure. The latest
+(`isStrataInstallationInUse`, including an unverified session); Check is blocked only by Configure. The latest
 20 terminal markers per installation are kept. Run status is display-only and
 never used to kill processes.
 
-While a Strata profile is active: `startServer`/`buildArgs` reject it, Dashboard
-shows `strata:<id> (profile)` instead of the version and disables Start/Restart,
-Models tab Set Active and download-as-mmproj do not modify the profile, and
-`listDevices`/Devices modal return a Check/Configure hint instead of running
-`--list-devices`.
+While a Strata profile is active: `buildArgs` rejects it, Dashboard shows
+`strata:<id> (profile)` instead of the version, Models tab Set Active and
+download-as-mmproj do not modify the profile, and `listDevices`/Devices modal
+return a Check/Configure hint instead of running `--list-devices`.
+
+#### Windows Strata service lifecycle
+
+`server.ts` is the facade; `stratasession.ts` coordinates the Strata session,
+`strataservice.ts` holds process identity/HTTP/port/key helpers and `logtail.ts`
+tails files. One session (llama or Strata, including an unverified Strata marker)
+exists at a time; `startServer(config, { profileName? })` refuses otherwise and
+routes Strata profiles to the coordinator.
+
+Start: validate installation/config, inspect, build the launch spec, refuse if
+the port answers or cannot be bound, then spawn the private Python directly
+(`-u -m serve.server --engine strata --config <cfg> --host --port`) with stdout/
+stderr redirected to `LOGS_DIR\strata.<ts>.log` and its `.err` sibling,
+`detached = server.startDetached`, an environment without inherited
+`STRATA_API_KEY` plus the profile key when set, and `PYTHONIOENCODING=utf-8`.
+The supervisor's `Win32_Process` creation time and executable are read
+immediately; failure to read them or to write the marker force-stops the new tree.
+
+Session marker v2 (`STATE_DIR\session.json`): `{version: 2, runtime: "strata",
+sessionId, pid, pidCreatedAt, executable, engineExecutable, startedAt,
+installationId, installationRoot, profileName, configPath, host, port, pollHost,
+logFiles: {out, err, engine, engineStart}, keySource}`; no secrets. Unversioned
+markers are legacy llama markers with unchanged behavior; a versioned marker that
+does not validate is ignored (never treated as llama).
+
+Monitoring is session-owned: `GET /v1/status` (Bearer key re-resolved from the
+profile, else config; no redirects) every `dashboard.pollIntervalMs`, one request
+in flight. Poll host: loopback for wildcard binds, bracketed IPv6. States:
+loading (unreachable before HTTP first seen; no timeout), ready, busy (in-flight
+> 0), unloaded (`loaded: false`), unreachable (after HTTP seen, or 401/HTTP
+errors), stopping, failed (process exited; marker cleared) and unverified.
+Log lines are tagged `[out]`/`[err]`/`[engine]` (engine log from its size at
+launch) and only appended to the log buffer, bypassing llama parsers. Strata's
+PID is not passed to System residency.
+
+Stop modes: `graceful` (Dashboard) returns `{ok: false, canForce: true}` when
+`POST /v1/unload` fails (409 busy, unreachable, auth); `force-on-failure`
+(`--stop`, Stop & Exit, `killServerOnExit`) continues; `force` skips unload.
+After unload, engine descendants are awaited (20 s). Identity is re-checked: a
+gone or reused PID finishes without killing; otherwise the recorded tree is
+`taskkill /T /F`'d and each member (PID + creation time) verified gone (15 s),
+else the marker is kept and `{ok: false}` returned.
+
+Reattach (`detectExistingSession({monitor, pollIntervalMs, config})`, sync):
+dead PID clears the marker; snapshot failure or mismatching creation time/
+executable marks the session unverified (never killed; Dashboard Stop offers
+`clearUnverifiedSession()` after confirmation, Start is blocked, `--stop` exits
+1); verified sessions resume tails/polling (`--stop` uses `monitor: false`).
 
 #### Display
 

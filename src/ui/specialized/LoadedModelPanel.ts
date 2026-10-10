@@ -1,5 +1,6 @@
 import { Control } from "../../framework/Control";
 import { fg } from "../../lib/theme";
+import type { Color } from "../../lib/theme";
 import { formatNum, spinnerChar, SPINNER_INTERVAL, cycleDetailLevel } from "../../lib/utils";
 import { EventEmitter } from "events";
 import type { RenderContext, Size } from "../../framework/types";
@@ -351,6 +352,46 @@ export function getLoadingModelName(): string | null {
   return isModelLoading() ? accum.name || null : null;
 }
 
+/**
+ * Strata services have no llama.cpp startup log to parse; the session
+ * coordinator publishes this read-only view (from the generated config and
+ * the service's status API) instead.
+ */
+export interface StrataModelView {
+  model: string;
+  backend: string | null;
+  context: string | null;
+  kv: string | null;
+  endpoint: string;
+  bind: string;
+  keySource: string;
+  state: string;
+  /** When set, the state label shows elapsed time since this epoch ms. */
+  since: number | null;
+  detail: string | null;
+}
+
+let strataView: StrataModelView | null = null;
+
+export function setStrataModelView(view: StrataModelView | null): void {
+  strataView = view;
+  notify();
+}
+
+export function getStrataModelView(): StrataModelView | null {
+  return strataView;
+}
+
+const STRATA_STATE_COLORS: Record<string, Color> = {
+  ready: "success", busy: "info", loading: "warning", starting: "warning", unloaded: "textMuted",
+  stopping: "warning", unreachable: "danger", failed: "danger", unverified: "danger",
+};
+
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 import type { DetailLevel } from "../../lib/utils";
 export type ModelDetailLevel = DetailLevel;
 
@@ -385,13 +426,54 @@ export class LoadedModelPanel extends Control {
       this.markDirty();
     });
     this._spinnerTimer = setInterval(() => {
-      if (isModelLoading()) {
+      if (isModelLoading() || strataView?.since) {
         this.markDirty();
       }
     }, SPINNER_INTERVAL);
   }
 
+  protected strataRows(): number {
+    if (!strataView) return 0;
+    if (this._detailLevel === "basic") return 1;
+    if (this._detailLevel === "middle") return 2;
+    return strataView.detail ? 3 : 2;
+  }
+
+  protected drawStrata(ctx: RenderContext, view: StrataModelView): void {
+    const { canvas } = ctx;
+    const { x, y, width, height } = this.rect;
+    const rows = Math.min(height, this.strataRows());
+    if (rows < 1) return;
+    canvas.moveTo(x, y);
+    fg(canvas, "accent", view.model);
+    if (view.backend) fg(canvas, "textMuted", `  ·  ${view.backend.toUpperCase()}`);
+    if (view.context) {
+      fg(canvas, "textMuted", "  ·  Ctx ");
+      fg(canvas, "text", view.context);
+    }
+    fg(canvas, "textMuted", "  ·  ");
+    const label = view.since ? `${view.state} ${fmtElapsed(Date.now() - view.since)} ${spinnerChar()}` : view.state;
+    fg(canvas, STRATA_STATE_COLORS[view.state] ?? "text", label);
+    if (rows < 2) return;
+    canvas.moveTo(x, y + 1);
+    fg(canvas, "textMuted", "  Endpoint ");
+    fg(canvas, "text", view.endpoint);
+    fg(canvas, "textMuted", `  (bind ${view.bind})`);
+    if (view.kv) {
+      fg(canvas, "textMuted", "  ·  KV ");
+      fg(canvas, "text", view.kv);
+    }
+    fg(canvas, "textMuted", `  ·  key: ${view.keySource}`);
+    if (rows < 3 || !view.detail) return;
+    canvas.moveTo(x, y + 2);
+    const text = `  ${view.detail}`;
+    fg(canvas, "textMuted", text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text);
+  }
+
   measure(parentSize?: Size): Size {
+    if (strataView) {
+      return { width: parentSize?.width ?? this.rect.width, height: this.strataRows() };
+    }
     const model = getModelInfo();
     if (!model) {
       return { width: parentSize?.width ?? this.rect.width, height: 1 };
@@ -418,6 +500,10 @@ export class LoadedModelPanel extends Control {
   draw(ctx: RenderContext): void {
     const { canvas } = ctx;
     const { x, y } = this.rect;
+    if (strataView) {
+      this.drawStrata(ctx, strataView);
+      return;
+    }
     const model = getModelInfo();
 
     if (!model) {

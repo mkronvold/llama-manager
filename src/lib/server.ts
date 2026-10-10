@@ -10,6 +10,15 @@ import { processModelLine, resetModelInfo } from "../ui/specialized/LoadedModelP
 import { taskStore } from "./tasks";
 import { detectForkFromFolder, resolveBinaryName, isForkCompatibleWithPreset, isFieldCompatibleWithFork, getFieldFlag, isNegateInverted, getFieldTransform } from "./forks";
 import { isStrataVersion } from "./runtime";
+import {
+  clearUnverifiedStrataSession, forceStopStrataSessionSync, getStrataSessionStatus, hasStrataSession, isStrataSessionMarker,
+  reattachStrataSession, setStrataHost, startStrataSession, stopStrataSession,
+} from "./stratasession";
+import type { StopMode, StopResult, StrataSessionMarker } from "./stratasession";
+import type { StrataServiceState } from "./strataservice";
+
+export type { StopMode, StopResult } from "./stratasession";
+export { isStrataInstallationInUse } from "./stratasession";
 
 // NB: Windows/POSIX binary-name resolution lives solely in forks.ts's
 // `resolveBinaryName()` (used below), which this file previously duplicated via a
@@ -81,10 +90,15 @@ function clearSessionFile(): void {
   }
 }
 
-function readSessionFile(): SessionFileInfo | null {
+function readSessionFile(): SessionFileInfo | StrataSessionMarker | null {
   try {
     if (!fs.pathExistsSync(getSessionFile())) return null;
     const data = fs.readJsonSync(getSessionFile());
+    if (data && typeof data === "object" && "version" in data) {
+      // Versioned markers belong to newer runtimes; an unreadable one must not be
+      // treated as a legacy llama marker (that path would kill its PID unverified).
+      return isStrataSessionMarker(data) ? data : null;
+    }
     if (data && typeof data.pid === "number") return data as SessionFileInfo;
     return null;
   } catch {
@@ -92,15 +106,64 @@ function readSessionFile(): SessionFileInfo | null {
   }
 }
 
+export type SessionRuntime = "llama" | "strata";
+
+export interface DetectedSession {
+  pid: number;
+  runtime: SessionRuntime;
+  verified: boolean;
+  reason?: string;
+}
+
+export interface DetectSessionOptions {
+  /** Tail logs and poll the service (the TUI). `--stop` only needs stop targeting. */
+  monitor?: boolean;
+  pollIntervalMs?: number;
+  config?: ConfigData | null;
+}
+
+let lastConfig: ConfigData | null = null;
+
+setStrataHost({
+  ingest: (line) => appendStrataLine(line),
+  resetBuffer: () => {
+    stopDetachedLogTail();
+    stopErrTail();
+    resetMetrics();
+    resetModelInfo();
+    serverLogLines.length = 0;
+    logEmitter.emit("log", "");
+  },
+  statusChanged: () => statusEmitter.emit("change"),
+  setLogFiles: (out, err) => {
+    currentLogFile = out;
+    currentErrFile = err;
+  },
+  getConfig: () => lastConfig,
+});
+
 /**
  * Called once at app startup. Detects a server left running detached by a
  * previous "Exit Now" (or a crash) via the session marker file, so this
  * process's `getStatus()`/Dashboard can reflect it as running even though
  * this process never spawned it. Stale marker files (dead PID) are cleared.
+ * Strata markers are adopted only after their process identity is verified.
  */
-export function detectExistingSession(): SessionFileInfo | null {
-  const info = readSessionFile();
-  if (!info) return null;
+export function detectExistingSession(options: DetectSessionOptions = {}): DetectedSession | null {
+  if (options.config !== undefined) lastConfig = options.config;
+  const marker = readSessionFile();
+  if (!marker) return null;
+  if (isStrataSessionMarker(marker)) {
+    const result = reattachStrataSession(marker, {
+      monitor: options.monitor !== false,
+      pollIntervalMs: options.pollIntervalMs ?? 2000,
+    });
+    if (result.kind === "gone") return null;
+    return result.kind === "verified"
+      ? { pid: marker.pid, runtime: "strata", verified: true }
+      : { pid: marker.pid, runtime: "strata", verified: false, reason: result.reason };
+  }
+  const info = marker;
   if (!isPidAlive(info.pid)) {
     clearSessionFile();
     return null;
@@ -124,7 +187,7 @@ export function detectExistingSession(): SessionFileInfo | null {
     // alive, so backfill/tail it too and merge it into the same log view.
     tailErrFile(info.errFile);
   }
-  return info;
+  return { pid: info.pid, runtime: "llama", verified: true };
 }
 
 const MAX_LOG_LINES = 2000;
@@ -151,6 +214,16 @@ function ingestLogLine(line: string): void {
   logParser.processLine(line);
   processMetricLine(line);
   processModelLine(line);
+}
+
+/** Strata output is buffered for the Logs tab only; llama parsers never see it. */
+function appendStrataLine(line: string): void {
+  if (line.length === 0) return;
+  serverLogLines.push(line);
+  if (serverLogLines.length > maxLogLines) {
+    serverLogLines.splice(0, serverLogLines.length - maxLogLines);
+  }
+  logEmitter.emit("log", line);
 }
 
 let detachedTailStop: (() => void) | null = null;
@@ -375,15 +448,60 @@ export function listDevices(config: ConfigData): string {
   }
 }
 
-interface ServerStatus {
+export interface ServerStatus {
   running: boolean;
   pid: number | null;
   uptime: number;
+  runtime: SessionRuntime | null;
+  /** Strata only: service/model state, including "unverified" for an unadopted marker. */
+  state?: StrataServiceState;
+  detail?: string | null;
+  profileName?: string;
+  unverified?: boolean;
 }
 
+export interface StartServerOptions {
+  /** Defaults to the active profile; Restart passes the stopped session's profile. */
+  profileName?: string;
+}
 
-export function startServer(config: ConfigData): Promise<number> {
+function runningSessionDescription(): string | null {
+  const strata = getStrataSessionStatus();
+  if (strata) {
+    return strata.state === "unverified"
+      ? `an unverified Strata session (PID ${strata.pid}) is recorded; stop it to clear the marker first`
+      : `Strata profile "${strata.profileName}" is running (PID ${strata.pid})`;
+  }
+  if (serverProcess?.pid) return `llama.cpp server is running (PID ${serverProcess.pid})`;
+  if (detachedSessionPid && isPidAlive(detachedSessionPid)) {
+    return `llama.cpp server is running detached from a previous session (PID ${detachedSessionPid})`;
+  }
+  return null;
+}
+
+export function startServer(config: ConfigData, options: StartServerOptions = {}): Promise<number> {
   return withLock(async () => {
+    lastConfig = config;
+    const running = runningSessionDescription();
+    if (running) throw new Error(`Server already running: ${running}`);
+    const profileName = options.profileName ?? config.server.activeProfile;
+    const profile = config.server.profiles[profileName];
+    if (!profile) throw new Error(`Profile "${profileName}" does not exist`);
+    if (isStrataProfile(profile)) {
+      return startStrataSession(config, profileName, {
+        detached: config.server.startDetached !== false,
+        pollIntervalMs: config.dashboard.pollIntervalMs,
+      });
+    }
+    if (profileName !== config.server.activeProfile) {
+      throw new Error(`Profile "${profileName}" is not active; select it before starting`);
+    }
+    return startLlamaServer(config);
+  });
+}
+
+function startLlamaServer(config: ConfigData): Promise<number> {
+  {
     resetMetrics();
     return new Promise(async (resolve, reject) => {
       if (serverProcess?.pid) {
@@ -396,17 +514,13 @@ export function startServer(config: ConfigData): Promise<number> {
       }
 
       const versionsDir = getVersionsDir(config);
-      if (isStrataProfile(getActiveProfile(config))) {
-        reject(new Error(`Profile "${config.server.activeProfile}" uses Strata, which cannot be started yet; switch to a llama.cpp profile`));
-        return;
-      }
       const activeVersion = config.activeVersion;
       if (!activeVersion) {
         reject(new Error("No active version selected"));
         return;
       }
       if (isStrataVersion(activeVersion)) {
-        reject(new Error("Strata lifecycle support is not implemented yet; select a llama-compatible version"));
+        reject(new Error("A Strata installation is not a llama.cpp version; start Strata through a Strata profile"));
         return;
       }
 
@@ -518,7 +632,7 @@ export function startServer(config: ConfigData): Promise<number> {
 
       resolve(serverProcess.pid!);
     });
-  });
+  }
 }
 
 /**
@@ -545,8 +659,35 @@ function terminateProcessTree(pid: number, force: boolean): void {
   }
 }
 
-export function stopServer(): Promise<void> {
-  return withLock(() => new Promise((resolve) => {
+export interface StopServerOptions {
+  /** Strata only; llama keeps its graceful-then-forced taskkill sequence. Default "force-on-failure". */
+  mode?: StopMode;
+}
+
+export function stopServer(options: StopServerOptions = {}): Promise<StopResult> {
+  return withLock(async () => {
+    if (hasStrataSession()) return stopStrataSession(options.mode ?? "force-on-failure");
+    await stopLlamaServer();
+    return { ok: true, forced: false };
+  });
+}
+
+/** Forgets an unverified Strata marker without touching its PID. */
+export function clearUnverifiedSession(): boolean {
+  return clearUnverifiedStrataSession();
+}
+
+/** `killServerOnExit` during dispose: must take effect before this process exits. */
+export function stopServerOnExit(): void {
+  if (hasStrataSession()) {
+    forceStopStrataSessionSync();
+    return;
+  }
+  stopServer().catch(() => {});
+}
+
+function stopLlamaServer(): Promise<void> {
+  return new Promise((resolve) => {
     const pid = serverProcess?.pid ?? detachedSessionPid;
     if (!pid) {
       resolve();
@@ -589,16 +730,31 @@ export function stopServer(): Promise<void> {
         terminateProcessTree(pid, true);
       }
     }, 5000);
-  }));
+  });
 }
 
 export function getStatus(): ServerStatus {
+  const strata = getStrataSessionStatus();
+  if (strata) {
+    return {
+      running: strata.running,
+      pid: strata.pid,
+      uptime: strata.uptime,
+      runtime: "strata",
+      state: strata.state,
+      detail: strata.detail,
+      profileName: strata.profileName,
+      unverified: strata.state === "unverified",
+    };
+  }
+
   if (serverProcess?.pid) {
     const alive = isPidAlive(serverProcess.pid);
     return {
       running: alive,
       pid: serverProcess.pid,
       uptime: alive && serverStartTime ? Date.now() - serverStartTime : 0,
+      runtime: "llama",
     };
   }
 
@@ -611,6 +767,7 @@ export function getStatus(): ServerStatus {
         running: true,
         pid: detachedSessionPid,
         uptime: detachedSessionStartedAt ? Date.now() - detachedSessionStartedAt : 0,
+        runtime: "llama",
       };
     }
     detachedSessionPid = null;
@@ -618,7 +775,7 @@ export function getStatus(): ServerStatus {
     clearSessionFile();
   }
 
-  return { running: false, pid: null, uptime: 0 };
+  return { running: false, pid: null, uptime: 0, runtime: null };
 }
 
 export function buildArgs(config: ConfigData, logFile: string): string[] {

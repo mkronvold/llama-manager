@@ -33,6 +33,7 @@ import {
   type StrataOpAction,
   type StrataOpMarker,
 } from "../../lib/strataops";
+import { isStrataInstallationInUse } from "../../lib/server";
 import { createSelectorModal } from "../../framework/widgets/SelectorModal";
 import { WrappedTextView, type TextLine } from "../specialized/WrappedTextView";
 import { fireAsync } from "../../lib/utils";
@@ -572,8 +573,7 @@ export class ServerControl extends Control {
         if (!confirmed) return;
       }
       try {
-        // Strata services cannot run yet, so nothing can be using this installation.
-        const marker = await startStrataOp(installation, python, action, { isServiceUsingInstallation: () => false });
+        const marker = await startStrataOp(installation, python, action, { isServiceUsingInstallation: isStrataInstallationInUse });
         ctx.showMessage(marker.state === "failed"
           ? describeStrataOp(marker)
           : `Strata ${action === "check" ? "Check" : "Configure"} opened in a new window`);

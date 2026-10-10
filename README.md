@@ -80,7 +80,7 @@ Verify with `node --version` (should print `v22.x.x`) before retrying the versio
 
 ```
 llama-manager          # launch the interactive TUI
-llama-manager --stop    # stop a server left running in the background, without launching the TUI
+llama-manager --stop    # stop a server (llama.cpp or Strata) left running in the background, without launching the TUI
 ```
 
 Choosing **Exit Now** in the Exit dialog (when a server is running) leaves the server running
@@ -135,11 +135,35 @@ non-zero exit as failed, and Configure is only reported completed if a usable
 config is found afterwards. Only one Configure per installation runs at a time.
 New configs appear in the config selector; existing profiles are not rebound.
 
-Strata lifecycle is not implemented yet: with a Strata profile active, Dashboard
-shows the bound installation instead of a version and Start/Restart are
-disabled, the Models tab does not change the active model/mmproj (the Strata
-model is chosen by Configure), and device scanning is replaced by Check/Configure.
+With a Strata profile active, Dashboard shows the bound installation instead of a
+version, the Models tab does not change the active model/mmproj (the Strata model
+is chosen by Configure), and device scanning is replaced by Check/Configure.
 Existing llama.cpp profiles and the active version are unchanged.
+
+### Strata service lifecycle (Windows)
+
+**Start** launches the installation's Python service on the profile's host/port
+(refused if that port is already listening) and loads the model. The profile API
+key, if set, is passed in the `STRATA_API_KEY` environment variable, never on the
+command line; otherwise Strata's own configured key applies. Only one session
+(llama.cpp or Strata) runs at a time. The Loaded Model panel shows model, backend,
+context, KV, endpoint and state: Loading (with elapsed time and the latest
+`[strata]` status line, no timeout), Ready, Busy, Unloaded, Unreachable, Stopping
+or Failed. Logs merges Python stdout (`[out]`), stderr (`[err]`) and the engine
+log (`[engine]`, this run only); llama task/metrics parsing is not applied.
+
+**Stop** asks Strata to unload the model, waits for the engine to exit, then ends
+the service's process tree and verifies nothing is left. If the model is busy or
+the service does not answer, Stop asks before force-stopping (active requests are
+cancelled). **Restart** restarts the running session's profile. **Exit Now**
+leaves the service running; the next launch reattaches only after confirming the
+recorded process is still the same one (PID, start time and executable). A
+session that cannot be verified is shown as unverified and is never stopped
+automatically: Stop then only clears its marker after confirmation.
+`llama-manager --stop` and **Stop & Exit** force-stop after a failed unload, and
+report failure (exit code 1, or staying open) unless shutdown is confirmed.
+Per-request metrics, tasks and System memory attribution for Strata are not
+implemented yet.
 
 ## Navigation
 

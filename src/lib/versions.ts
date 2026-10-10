@@ -252,7 +252,7 @@ export async function listVersions(config: ConfigData, inspectionRunner?: Inspec
 
 export async function switchVersion(config: ConfigData, version: string): Promise<ConfigData> {
   if (isStrataVersion(version)) {
-    throw new Error("Strata is registered for inspection only; profile and lifecycle support are not implemented yet");
+    throw new Error("A Strata installation is not a llama.cpp version; start Strata through a Strata profile");
   }
   const dir = getVersionsDir(config);
   const versionPath = path.join(dir, version);

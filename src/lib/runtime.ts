@@ -45,7 +45,7 @@ const ADAPTERS: Record<RuntimeKind, RuntimeAdapter> = {
       telemetry: "json-api",
       listDevices: false,
       modelSelection: false,
-      lifecycleAvailable: false,
+      lifecycleAvailable: true,
     },
   },
 };

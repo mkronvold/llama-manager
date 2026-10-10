@@ -6,7 +6,7 @@ import terminalKit from "terminal-kit";
 import { LlamaManagerApp } from "./LlamaManagerApp";
 import { checkWindowsConsoleCapabilities } from "./lib/termcaps";
 import { checkNodeVersionCompatibility } from "./lib/nodeversion";
-import { getLogsDir } from "./lib/config";
+import { getLogsDir, loadConfig } from "./lib/config";
 import { detectExistingSession, stopServer } from "./lib/server";
 
 async function runStopCli(): Promise<never> {
@@ -14,13 +14,25 @@ async function runStopCli(): Promise<never> {
   // a previous "Exit Now" (or one that survived a crash), without launching
   // the TUI at all. Relies on the same session marker file / stop logic the
   // app itself uses for reattach, so behavior stays consistent.
-  const session = detectExistingSession();
+  const config = await loadConfig().catch(() => null);
+  const session = detectExistingSession({ monitor: false, config });
   if (!session) {
     console.log("No running server found.");
     process.exit(0);
   }
-  console.log(`Stopping server (PID ${session.pid})...`);
-  await stopServer();
+  if (!session.verified) {
+    console.error(`A Strata session marker names PID ${session.pid}, but ${session.reason}.`);
+    console.error("It was not stopped. Check that process manually, then clear the marker from the Dashboard.");
+    process.exit(1);
+  }
+  const label = session.runtime === "strata" ? "Strata service" : "server";
+  console.log(`Stopping ${label} (PID ${session.pid})...`);
+  const result = await stopServer({ mode: "force-on-failure" });
+  if (!result.ok) {
+    console.error(`Stop failed: ${result.reason}`);
+    process.exit(1);
+  }
+  if (result.forced && result.reason) console.log(`Cooperative unload failed (${result.reason}); force-stopped.`);
   console.log("Stopped.");
   process.exit(0);
 }

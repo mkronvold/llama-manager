@@ -134,7 +134,10 @@ class SystemPanel extends Control {
   protected refresh(): void {
     // The residency breakdown is per-process, so the running server's PID is
     // passed down and folded into the same counter query.
-    const serverPid = getStatus().pid;
+    // Strata's PID is the Python supervisor, not the engine holding the model,
+    // so residency would be misattributed; engine attribution arrives with telemetry.
+    const status = getStatus();
+    const serverPid = status.runtime === "llama" ? status.pid : null;
     getSystemSnapshot(this._ctx?.getConfig(), serverPid).then((snapshot) => {
       if (this._destroyed) return;
       this._snapshot = snapshot;

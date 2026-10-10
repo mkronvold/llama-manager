@@ -12,7 +12,8 @@ import type { MetricsDetailLevel } from "../specialized/MetricsPanel";
 import { TaskChartsSection } from "../specialized/TaskChartsSection";
 import { focusManager } from "../../framework/FocusManager";
 import { modalManager } from "../../framework/ModalManager";
-import { getStatus, startServer, stopServer, onServerStatusChange } from "../../lib/server";
+import { getStatus, startServer, stopServer, onServerStatusChange, clearUnverifiedSession } from "../../lib/server";
+import { createConfirmDialog } from "../../framework/widgets/ConfirmDialog";
 import { fireAsync } from "../../lib/utils";
 import { BACKEND_LABELS, listVersions, switchVersion } from "../../lib/versions";
 import { detectForkFromFolder } from "../../lib/forks";
@@ -127,11 +128,7 @@ export class DashboardControl extends Control {
 
     buttons[1]?.setAction(() => {
       fireAsync(async () => {
-        const stoppingModal = createStoppingServerModal();
-        modalManager.open(stoppingModal);
-        await stopServer();
-        modalManager.close();
-        ctx.forceRender();
+        await this.stopInteractive(ctx);
       }, ctx);
       this.markDirty();
     });
@@ -140,12 +137,10 @@ export class DashboardControl extends Control {
       fireAsync(async () => {
         const config = ctx.getConfig();
         if (!config) throw new Error("No config loaded");
-        const stoppingModal = createStoppingServerModal();
-        modalManager.open(stoppingModal);
-        await stopServer();
-        modalManager.close();
-        ctx.forceRender();
-        await startServer(config);
+        // Restart the session that is running, even if another profile is selected now.
+        const profileName = getStatus().profileName;
+        if (!(await this.stopInteractive(ctx))) return;
+        await startServer(config, { profileName });
       }, ctx);
       this.markDirty();
     });
@@ -158,6 +153,46 @@ export class DashboardControl extends Control {
     });
 
     this.markDirty();
+  }
+
+  /**
+   * Interactive Stop: never escalates silently. A busy/unreachable Strata
+   * service asks before force-stopping; an unverified marker is only cleared.
+   * Resolves true once the session is gone.
+   */
+  protected async stopInteractive(ctx: TabContext): Promise<boolean> {
+    const status = getStatus();
+    if (status.unverified) {
+      const clear = await ctx.openModal<boolean>(createConfirmDialog(
+        "Clear unverified session?",
+        `Session PID ${status.pid} could not be verified (${status.detail ?? "unknown reason"}). ` +
+        "llama-manager will not stop or kill it. Clear the session marker so a new session can start? " +
+        "Check that process yourself first.",
+      ));
+      if (clear) clearUnverifiedSession();
+      ctx.forceRender();
+      return clear === true;
+    }
+    const runStop = async (mode: "graceful" | "force") => {
+      modalManager.open(createStoppingServerModal());
+      try {
+        return await stopServer({ mode });
+      } finally {
+        modalManager.close();
+        ctx.forceRender();
+      }
+    };
+    let result = await runStop("graceful");
+    if (result.ok) return true;
+    if (!result.canForce) throw new Error(result.reason);
+    const force = await ctx.openModal<boolean>(createConfirmDialog(
+      "Force stop?",
+      `${result.reason}. Force stop terminates the service; active requests will be cancelled.`,
+    ));
+    if (!force) return false;
+    result = await runStop("force");
+    if (!result.ok) throw new Error(result.reason);
+    return true;
   }
 
   onDestroy(): void {
@@ -234,18 +269,20 @@ export class DashboardControl extends Control {
       this._versionSelector.value = "";
     }
 
-    if (!getStatus().running) {
-      this._hintLabel.text = isStrataProfile(profile) ? " Strata Start/Stop arrives in a later phase" : "";
+    const status = getStatus();
+    if (status.unverified) {
+      this._hintLabel.text = " Unverified session: Stop clears its marker";
+    } else if (!status.running) {
+      this._hintLabel.text = "";
     }
   }
 
   updateButtons(): void {
     const status = getStatus();
-    const config = this._ctx?.getConfig();
-    const strata = config ? isStrataProfile(getActiveProfile(config)) : false;
-    this._buttons[0].disabled = status.running || strata;
-    this._buttons[1].disabled = !status.running;
-    this._buttons[2].disabled = !status.running || strata;
+    const unverified = status.unverified === true;
+    this._buttons[0].disabled = status.running || unverified;
+    this._buttons[1].disabled = !status.running && !unverified;
+    this._buttons[2].disabled = !status.running;
   }
 
   markHint(): void {
