@@ -73,10 +73,18 @@ function defaultLaunchWindow(scriptPath: string): Promise<void> {
   });
 }
 
-export function strataToolArgs(action: StrataOpAction): string[] {
-  return action === "check"
-    ? ["setup.py", "--check"]
-    : ["setup.py", "--setup", "--no-start", "--no-browser"];
+// Upstream setup does not remember --models-dir; without it, Configure downloads into <data>/models
+// and ignores GGUFs already in the shared manager models folder. --vram-reserve-mib is carried over
+// from the profile's previous config because setup only keeps engine options it chose itself.
+export function strataToolArgs(
+  action: StrataOpAction,
+  opts: { modelsDir?: string | null; vramReserveMib?: number | null } = {},
+): string[] {
+  if (action === "check") return ["setup.py", "--check"];
+  const args = ["setup.py", "--setup", "--no-start", "--no-browser"];
+  if (opts.modelsDir) args.push("--models-dir", opts.modelsDir);
+  if (opts.vramReserveMib != null) args.push("--vram-reserve-mib", String(opts.vramReserveMib));
+  return args;
 }
 
 export function psQuote(value: string): string {
@@ -250,7 +258,11 @@ export async function startStrataOp(
   installation: StrataInstallation,
   python: string,
   action: StrataOpAction,
-  options: { isServiceUsingInstallation?: (id: string) => boolean } & StrataOpsDeps = {},
+  options: {
+    isServiceUsingInstallation?: (id: string) => boolean;
+    modelsDir?: string | null;
+    vramReserveMib?: number | null;
+  } & StrataOpsDeps = {},
 ): Promise<StrataOpMarker> {
   const opsDir = options.opsDir ?? getStrataOpsDir();
   const now = options.now ?? Date.now;
@@ -280,7 +292,7 @@ export async function startStrataOp(
     startedAt: new Date(now()).toISOString(), finishedAt: null, detail: null,
   };
   await fs.writeFile(f.script, `\uFEFF${buildStrataWrapperScript({
-    root: installation.root, python, args: strataToolArgs(action),
+    root: installation.root, python, args: strataToolArgs(action, { modelsDir: options.modelsDir, vramReserveMib: options.vramReserveMib }),
     pidFile: f.pid, exitFile: f.exit, title: action === "check" ? "Check" : "Configure",
   })}`, "utf8");
   await writeMarker(opsDir, marker);

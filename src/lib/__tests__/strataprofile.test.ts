@@ -188,6 +188,11 @@ describe("Strata tool runs", () => {
   it("uses only the agreed upstream flags", () => {
     expect(strataToolArgs("check")).toEqual(["setup.py", "--check"]);
     expect(strataToolArgs("configure")).toEqual(["setup.py", "--setup", "--no-start", "--no-browser"]);
+    expect(strataToolArgs("configure", { modelsDir: "D:\\My Models" })).toEqual(
+      ["setup.py", "--setup", "--no-start", "--no-browser", "--models-dir", "D:\\My Models"]);
+    expect(strataToolArgs("configure", { modelsDir: "D:\\M", vramReserveMib: 1212 })).toEqual(
+      ["setup.py", "--setup", "--no-start", "--no-browser", "--models-dir", "D:\\M", "--vram-reserve-mib", "1212"]);
+    expect(strataToolArgs("check", { modelsDir: "D:\\My Models", vramReserveMib: 1212 })).toEqual(["setup.py", "--check"]);
   });
 
   it("quotes paths with spaces and single quotes", () => {

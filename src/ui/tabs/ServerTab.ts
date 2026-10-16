@@ -10,7 +10,7 @@ import { StyledText } from "../../framework/widgets/StyledText";
 import { focusManager } from "../../framework/FocusManager";
 import path from "node:path";
 import fs from "fs-extra";
-import { ConfigData, DEFAULT_PRESETS, ServerPresets, ServerProfile, isStrataProfile, saveConfig } from "../../lib/config";
+import { ConfigData, DEFAULT_PRESETS, ServerPresets, ServerProfile, getModelsDir, isStrataProfile, saveConfig } from "../../lib/config";
 import type { StrataInstallation, StrataProfileBinding } from "../../lib/runtime";
 import { inspectStrata } from "../../lib/strata";
 import {
@@ -33,6 +33,7 @@ import {
   type StrataOpAction,
   type StrataOpMarker,
 } from "../../lib/strataops";
+import { readConfigVramReserve, tuneConfiguredStrataConfigs } from "../../lib/strataconfigure";
 import { isStrataInstallationInUse } from "../../lib/server";
 import { createSelectorModal } from "../../framework/widgets/SelectorModal";
 import { WrappedTextView, type TextLine } from "../specialized/WrappedTextView";
@@ -523,17 +524,29 @@ export class ServerControl extends Control {
       const marker = markers.find((m) => m.action === action);
       if (!marker) continue;
       let next = await reconcileStrataOp(marker);
+      let tuning = "";
       next = await finalizeStrataOp(next, async () => {
+        if (action === "configure") tuning = await this.tuneConfiguredConfigs(installation, next.startedAt);
         const inspection = await inspectStrata(installation.root);
         return {
           ready: inspection.ready,
           detail: inspection.issues[0] ?? inspection.configs.find((c) => c.issues.length)?.issues[0],
         };
       });
-      if (isActiveStrataOp(marker) && !isActiveStrataOp(next)) this._ctx?.showMessage(describeStrataOp(next));
+      if (isActiveStrataOp(marker) && !isActiveStrataOp(next)) {
+        this._ctx?.showMessage(describeStrataOp(next) + (tuning ? `; ${tuning}` : ""));
+      }
       latest.push(next);
     }
     return latest;
+  }
+
+  /** Reapplies the manager's tuning to configs a finished Configure run wrote; returns a short summary. */
+  protected async tuneConfiguredConfigs(installation: StrataInstallation, startedAt: string): Promise<string> {
+    const files = await listStrataConfigFiles(installation.root);
+    const results = await tuneConfiguredStrataConfigs(files, Date.parse(startedAt));
+    const parts = results.map((r) => `${path.basename(r.file)}: ${r.error ? `tuning failed (${r.error})` : r.changes.join("; ") || "no tuning needed"}`);
+    return parts.join(" | ");
   }
 
   protected startOpPolling(): void {
@@ -568,12 +581,18 @@ export class ServerControl extends Control {
         const confirmed = await ctx.openModal<boolean>(createConfirmDialog(
           "Configure Strata",
           "Open Strata setup in a new window? It asks which model and settings to use and may download large files. " +
-            "No model is started. llama-manager refreshes when the window finishes.",
+            `GGUF files are reused from or downloaded to ${getModelsDir(config)}. ` +
+            "When it finishes, llama-manager reapplies its tuning (prefill, conversation cache, and KV cache in VRAM " +
+            "when the last load measured room for it). No model is started.",
         ));
         if (!confirmed) return;
       }
       try {
-        const marker = await startStrataOp(installation, python, action, { isServiceUsingInstallation: isStrataInstallationInUse });
+        const marker = await startStrataOp(installation, python, action, {
+          isServiceUsingInstallation: isStrataInstallationInUse,
+          modelsDir: getModelsDir(config),
+          vramReserveMib: action === "configure" ? await readConfigVramReserve(profile.strata.configPath) : null,
+        });
         ctx.showMessage(marker.state === "failed"
           ? describeStrataOp(marker)
           : `Strata ${action === "check" ? "Check" : "Configure"} opened in a new window`);

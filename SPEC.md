@@ -593,10 +593,12 @@ seeding copies the active profile's values unless missing or still the llama
 defaults (127.0.0.1 / 8080), which become 0.0.0.0 / 1234; restore-default uses
 the same. A non-loopback host with no profile or config API key produces a
 non-blocking exposure warning. Generated config settings are displayed read-only
-(path flags as basenames); the config file is never rewritten.
+(path flags as basenames); the profile view and Start never rewrite the config
+(only the post-Configure tuning below does).
 
 Check/Configure run `setup.py --check` or `setup.py --setup --no-start
---no-browser` with the installation's private Python, in a new PowerShell window
+--no-browser --models-dir <getModelsDir(config)>` (upstream does not persist
+`--models-dir`, so omitting it re-downloads GGUFs into `<data>\models`) with the installation's private Python, in a new PowerShell window
 via a generated wrapper (`STATE_DIR\strata-ops\<opId>.ps1`, single-quote escaped
 arguments, UTF-8 BOM), opened by a hidden launcher PowerShell using
 `Start-Process` (Node's `detached` spawn has no console on Windows, so it cannot
@@ -605,6 +607,22 @@ manager writes the versioned `<opId>.json` marker (atomic tmp+move). States:
 starting, running, exited, then completed / failed (non-zero exit or launch
 failure) / abandoned (wrapper gone without exit code, or no PID within 120 s) /
 incomplete (Configure exit 0 without a usable config after revalidation).
+
+Configure also appends `--vram-reserve-mib N` when the bound config has one
+(setup drops engine options it did not choose). After an exit-0 Configure,
+before revalidation, `strataconfigure.ts` tunes every `strata-*.json` modified
+since the run started (atomic tmp+move; only `args` change; failures are
+reported, not fatal):
+- `--kv-resident` is removed (whole KV cache in VRAM) only if the config's
+  engine log shows a completed load since the last boot whose expert cache held
+  every profiled expert and whose free VRAM minus the extra KV bytes
+  (cells × 13 layers × setup's per-cell bytes) leaves ≥ 2048 MiB; otherwise
+  streaming is kept and the reason reported.
+- `--prefill auto` becomes `auto:32768` with ≥ 64 GiB RAM (setup's risk floor).
+- `--conversation-cache-mib 8192` is added with ≥ 86 GiB RAM (largest model's
+  62 GiB + setup's 24 GiB agent-cache margin).
+Explicit existing values are kept. The change summary is shown with the run's
+completion message.
 Configure is exclusive per installation and blocked by a running-service hook
 (`isStrataInstallationInUse`, including an unverified session); Check is blocked only by Configure. The latest
 20 terminal markers per installation are kept. Run status is display-only and

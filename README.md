@@ -128,12 +128,22 @@ shown read-only from the generated config; **Strata Config** switches between
 that installation's configs.
 
 **Check** (`setup.py --check`) and **Configure** (`setup.py --setup --no-start
---no-browser`) open upstream tooling in a separate PowerShell window from the
-installation folder. The manager never passes `--yes`. Run status survives a
+--no-browser --models-dir <manager models folder>`) open upstream tooling in a separate PowerShell window from the
+installation folder. Configure passes the manager's models folder because
+upstream does not remember it; without it, setup would download a second copy
+into `<Strata data>\models` instead of reusing existing GGUFs. The manager never passes `--yes`. Run status survives a
 manager restart: a closed window without an exit code is shown as abandoned, a
 non-zero exit as failed, and Configure is only reported completed if a usable
 config is found afterwards. Only one Configure per installation runs at a time.
 New configs appear in the config selector; existing profiles are not rebound.
+
+Setup regenerates the config on every Configure and drops options it does not
+choose, so llama-manager carries the bound config's `--vram-reserve-mib` into
+setup and, after a successful run, reapplies tuning to the configs it wrote:
+`--prefill auto:32768` (64 GiB+ RAM), `--conversation-cache-mib 8192` (86 GiB+
+RAM), and the whole KV cache in VRAM (`--kv-resident` removed) only when the
+last load since boot held every expert in VRAM with room left for the cache.
+Otherwise KV streaming is kept. The changes are listed when Configure finishes.
 
 With a Strata profile active, Dashboard shows the bound installation instead of a
 version, the Models tab does not change the active model/mmproj (the Strata model
