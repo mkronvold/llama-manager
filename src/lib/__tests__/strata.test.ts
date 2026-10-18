@@ -98,6 +98,10 @@ describe("Strata registration and inspection", () => {
     ]);
     expect(() => buildStrataLaunchSpec(inspection, "missing.json", "localhost", 8096)).toThrow("not usable");
     expect(() => buildStrataLaunchSpec(inspection, path.join(root, "strata-model.json"), "", 0)).toThrow("bind");
+    const derived = path.join(root, "state", "launch.json");
+    expect(buildStrataLaunchSpec(inspection, path.join(root, "strata-model.json"), "127.0.0.1", 8096, derived).args)
+      .toContain(derived);
+    expect(() => buildStrataLaunchSpec(inspection, "missing.json", "127.0.0.1", 8096, derived)).toThrow("not usable");
   });
 
   it.each([

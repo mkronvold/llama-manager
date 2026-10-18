@@ -81,8 +81,8 @@ describe("runtime-aware measurement presentation", () => {
   it("orders real slots without inventing task IDs or assigning a completion to an idle slot", () => {
     const snapshot = parseStrataMetrics(metricsFixture());
     snapshot.live.slots = [
-      { slot: 2, state: "decoding", generated: 4, promptTokens: 18, rate: 12, elapsedSeconds: 1 },
-      { slot: 0, state: "idle", generated: null, promptTokens: null, rate: null, elapsedSeconds: null },
+      { slot: 2, state: "decoding", generated: 4, promptTokens: 18, rate: 12, elapsedSeconds: 1, heldTokens: null },
+      { slot: 0, state: "idle", generated: null, promptTokens: null, rate: null, elapsedSeconds: null, heldTokens: null },
     ];
     setStrataMetrics({ snapshot, receivedAt: Date.now(), error: null, historyError: null, missingRequests: 0 });
     const panel = new TestMetricsPanel();
@@ -94,6 +94,32 @@ describe("runtime-aware measurement presentation", () => {
       expect(text).not.toContain("Task #");
       expect(text).not.toContain("Ctx");
       expect(text).toContain("Active 1");
+    } finally { panel.destroy(); }
+  });
+
+  it("shows a request running outside idle batch slots instead of an all-idle dashboard", () => {
+    const snapshot = parseStrataMetrics(metricsFixture());
+    Object.assign(snapshot.live, { state: "reading", promptRead: null, promptTotal: null, promptTokens: 26651,
+      promptRate: 109.3, parallel: 4, running: 1, outsideSlots: 1, waiting: 0 });
+    snapshot.live.slots = [0, 1, 2, 3].map(slot => ({ slot, state: "idle", generated: null, promptTokens: null,
+      rate: null, elapsedSeconds: null, heldTokens: slot === 1 ? 4096 : 0 }));
+    setStrataMetrics({ snapshot, receivedAt: Date.now(), error: null, historyError: null, missingRequests: 0 });
+    const panel = new TestMetricsPanel();
+    try {
+      const text = panel.lines().join("\n");
+      expect(text).toMatch(/Solo path  . prompting/);
+      expect(text).toContain("26,651 being read");
+      expect(text).toContain("109.3 t/s");
+      expect(text.indexOf("Solo path")).toBeLessThan(text.indexOf("Slot 0"));
+      expect(text).toContain("Slot 1  \u25cb idle  ·  holds 4,096 tokens");
+      expect(text).toContain("Last service completion #1 (slot unavailable)");
+      snapshot.live.slots[2] = { slot: 2, state: "decoding", generated: 3, promptTokens: 50, rate: 20, elapsedSeconds: 1, heldTokens: null };
+      snapshot.live.running = 2;
+      setStrataMetrics({ snapshot, receivedAt: Date.now(), error: null, historyError: null, missingRequests: 0 });
+      expect(panel.lines().join("\n")).toMatch(/Admitting  . prompting/);
+      snapshot.live.outsideSlots = 0;
+      setStrataMetrics({ snapshot, receivedAt: Date.now(), error: null, historyError: null, missingRequests: 0 });
+      expect(panel.lines().join("\n")).not.toMatch(/Admitting|Solo path/);
     } finally { panel.destroy(); }
   });
 

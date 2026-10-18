@@ -74,6 +74,42 @@ describe("Strata profiles and tool runs", () => {
       expect(copy.strata).not.toBe(original.strata);
     });
 
+    it("round-trips engine overrides and rejects invalid ones", async () => {
+      const overrides = { maxContext: 262144, kvStreaming: "on" as const, kvResidentCells: 40960, prefill: "auto:32768" as const,
+        parallel: 4, batchMtp: "on" as const };
+      config.server.profiles["strata-halo"] = prof.buildStrataProfile(undefined, { ...binding(), overrides });
+      await cfgMod.saveConfig(config);
+      expect((await cfgMod.loadConfig()).server.profiles["strata-halo"]!.strata).toEqual({ ...binding(), overrides });
+      for (const bad of [{ maxContext: 1000 }, { maxContext: 524288 }, { kvStreaming: "yes" },
+        { kvResidentCells: 20479 }, { kvResidentCells: 32768.5 }, { prefill: "4096" },
+        { parallel: 0 }, { parallel: 9 }, { parallel: 2.5 }, { batchMtp: true }]) {
+        config.server.profiles["strata-halo"]!.strata = { ...binding(), overrides: bad as never };
+        await expect(cfgMod.saveConfig(config)).rejects.toThrow(/Strata engine setting/);
+      }
+    });
+
+    it("shows profile overrides against the config's own values", () => {
+      const settings = [{ key: "prefill", value: "auto" }, { key: "max-context", value: "204800" },
+        { key: "kv", value: "int8" }, { key: "kv-resident", value: "32768" }];
+      expect(prof.effectiveStrataSettings(settings, undefined).every((s) => !s.profile)).toBe(true);
+      const off = prof.effectiveStrataSettings(settings, { kvStreaming: "off", maxContext: 262144 });
+      expect(off.find((s) => s.key === "kv-resident")).toMatchObject({ profile: true, value: expect.stringMatching(/^off: .*config 32768/) });
+      expect(off.find((s) => s.key === "max-context")).toMatchObject({ profile: true, value: "262144  (profile; config 204800)" });
+      expect(off.find((s) => s.key === "prefill")).toMatchObject({ profile: false, value: "auto" });
+      const added = prof.effectiveStrataSettings([{ key: "kv", value: "int8" }], { kvStreaming: "on", prefill: "auto:32768" });
+      expect(added.slice(1)).toEqual([
+        { key: "kv-resident", value: "32768  (profile; config unset)", profile: true },
+        { key: "prefill", value: "auto:32768  (profile; config unset)", profile: true },
+      ]);
+      const batch = prof.effectiveStrataSettings(
+        [{ key: "batch-mtp", value: "on" }, { key: "kv", value: "int8" }, { key: "parallel", value: "2" }],
+        { parallel: 4, batchMtp: "off" },
+      );
+      expect(batch.find((s) => s.key === "parallel")).toMatchObject({ profile: true, value: "4  (profile; config 2)" });
+      expect(batch.find((s) => s.key === "batch-mtp")).toMatchObject({ profile: true, value: "off (profile; config on)" });
+      expect(prof.effectiveStrataSettings([{ key: "kv", value: "int8" }], { parallel: 1 }).every((s) => !s.profile)).toBe(true);
+    });
+
     it("falls back to 0.0.0.0:1234 for unset or llama-default endpoints", () => {
       const p = prof.buildStrataProfile(config.server.profiles.Default, binding());
       expect(p.presets.server.host).toBe("0.0.0.0");

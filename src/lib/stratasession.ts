@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import fs from "fs-extra";
-import { getErrFile, getLogsDir, getSessionFile, isStrataProfile } from "./config";
+import { getErrFile, getLogsDir, getSessionFile, getStrataLaunchDir, isStrataProfile } from "./config";
+import { writeStrataLaunchConfig } from "./strataconfigure";
 import type { ConfigData } from "./config";
 import { buildStrataLaunchSpec, inspectStrata } from "./strata";
 import type { StrataInspection } from "./strata";
@@ -36,6 +37,8 @@ export interface StrataSessionMarker {
   installationRoot: string;
   profileName: string;
   configPath: string;
+  /** Derived config actually launched when the profile overrides engine settings. */
+  launchConfigPath?: string;
   host: string;
   port: number;
   pollHost: string;
@@ -52,7 +55,8 @@ export function isStrataSessionMarker(value: unknown): value is StrataSessionMar
     typeof v.sessionId === "string" && typeof v.pid === "number" && typeof v.pidCreatedAt === "string" &&
     typeof v.executable === "string" && typeof v.startedAt === "number" &&
     typeof v.installationId === "string" && typeof v.profileName === "string" &&
-    typeof v.configPath === "string" && typeof v.host === "string" && typeof v.port === "number" &&
+    typeof v.configPath === "string" && (v.launchConfigPath === undefined || typeof v.launchConfigPath === "string") &&
+    typeof v.host === "string" && typeof v.port === "number" &&
     typeof v.pollHost === "string" && !!logs && typeof logs.out === "string" && typeof logs.err === "string" &&
     (logs.engine === null || typeof logs.engine === "string") && typeof logs.engineStart === "number";
 }
@@ -172,7 +176,8 @@ function fmtTokens(value: string | null): string | null {
 }
 
 async function loadConfigView(marker: StrataSessionMarker): Promise<ConfigView> {
-  const summary = await readStrataConfigSummary(marker.configPath);
+  let summary = await readStrataConfigSummary(marker.launchConfigPath ?? marker.configPath);
+  if (summary.error && marker.launchConfigPath) summary = await readStrataConfigSummary(marker.configPath);
   const setting = (key: string) => summary.settings.find((s) => s.key === key)?.value ?? null;
   return {
     model: summary.model ?? path.basename(marker.configPath, ".json"),
@@ -252,7 +257,7 @@ async function pollOnce(s: ActiveSession): Promise<void> {
   }
   const controller = new AbortController();
   s.request = controller;
-  const key = resolveKey(s.marker, await readConfigApiKey(s.marker.configPath));
+  const key = resolveKey(s.marker, await readConfigApiKey(s.marker.launchConfigPath ?? s.marker.configPath));
   if (active !== s || s.stopping || controller.signal.aborted) return;
   const baseUrl = strataBaseUrl(s.marker.pollHost, s.marker.port);
   const result = await fetchStrataStatus(baseUrl, key, 5000, controller.signal);
@@ -396,9 +401,16 @@ export async function startStrataSession(config: ConfigData, profileName: string
   const { host: bindHost, port } = profileEndpoint(profile);
 
   const inspection = await deps.inspect(installation.root);
+  const sessionId = randomUUID();
+  let launchConfigPath: string | null;
+  try {
+    launchConfigPath = await writeStrataLaunchConfig(configPath, profile.strata.overrides, getStrataLaunchDir(), sessionId);
+  } catch (error) {
+    throw new Error(`Could not apply the profile's Strata engine settings: ${errorMessage(error)}`);
+  }
   let spec;
   try {
-    spec = deps.buildLaunch(inspection, configPath, bindHost, port);
+    spec = deps.buildLaunch(inspection, configPath, bindHost, port, launchConfigPath ?? undefined);
   } catch (error) {
     const issues = [...inspection.issues,
       ...(inspection.configs.find((c) => c.path === path.resolve(configPath))?.issues ?? [])];
@@ -468,11 +480,12 @@ export async function startStrataSession(config: ConfigData, profileName: string
   }
 
   const marker: StrataSessionMarker = {
-    version: 2, runtime: "strata", sessionId: randomUUID(),
+    version: 2, runtime: "strata", sessionId,
     pid, pidCreatedAt: record.createdAt, executable: record.executable ?? spec.executable,
     engineExecutable: configInfo?.executable || null, startedAt,
     installationId: installation.id, installationRoot: installation.root, profileName,
-    configPath: path.resolve(configPath), host: bindHost, port, pollHost: resolvePollHost(bindHost),
+    configPath: path.resolve(configPath), ...(launchConfigPath ? { launchConfigPath } : {}),
+    host: bindHost, port, pollHost: resolvePollHost(bindHost),
     logFiles: { out, err, engine, engineStart }, keySource,
     runtimeVersion: `Strata ${inspection.sourceTag ?? inspection.sourceRevision ?? "source unknown"} / engine ${inspection.engineVersion ?? "unknown"}`,
   };
@@ -583,7 +596,7 @@ export async function stopStrataSession(mode: StopMode): Promise<StopResult> {
 
   let forcedReason: string | undefined;
   if (mode !== "force") {
-    const key = resolveKey(marker, await readConfigApiKey(marker.configPath));
+    const key = resolveKey(marker, await readConfigApiKey(marker.launchConfigPath ?? marker.configPath));
     const unload = await requestStrataUnload(strataBaseUrl(marker.pollHost, marker.port), key, deps.unloadTimeoutMs);
     if (unload.kind !== "unloaded") {
       const reason = describeUnloadFailure(unload);

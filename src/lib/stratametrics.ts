@@ -29,7 +29,11 @@ export interface StrataLive {
   parallel: number | null;
   running: number | null;
   waiting: number | null;
-  slots: { slot: number; state: string; generated: number | null; promptTokens: number | null; rate: number | null; elapsedSeconds: number | null }[];
+  /** Requests in flight outside the batch slots: alone on the solo path, being admitted, or waiting. */
+  outsideSlots: number | null;
+  /** Prompt length of the newest request in flight (stock live.prompt_tokens). */
+  promptTokens: number | null;
+  slots: { slot: number; state: string; generated: number | null; promptTokens: number | null; rate: number | null; elapsedSeconds: number | null; heldTokens: number | null }[];
 }
 
 export interface StrataMetrics {
@@ -72,9 +76,11 @@ function text(value: unknown, field: string): string | null {
   return value;
 }
 
-function difference(total: number | null, cached: number | null, field: string): number | null {
-  if (total === null || cached === null) return null;
-  if (cached > total) throw new Error(`Invalid ${field}: cached exceeds processed input`);
+// Upstream counters can disagree for one record (e.g. finish=error reported more reused
+// than processed tokens). That makes the derived value unknown; it must not reject the
+// whole snapshot, which would freeze live activity on stale data.
+function difference(total: number | null, cached: number | null): number | null {
+  if (total === null || cached === null || cached > total) return null;
   return total - cached;
 }
 
@@ -98,9 +104,10 @@ export function parseStrataMetrics(value: unknown): StrataMetrics {
     const n = (key: string, integer = false) => number(r[key], `request.${key}`, integer);
     const processedInput = n("prompt_tokens", true), cachedInput = n("reused", true);
     const requestedInput = n("prompt_total", true);
-    if (requestedInput !== null && processedInput !== null && processedInput > requestedInput) throw new Error("Processed input exceeds requested input");
-    const draftsAccepted = n("drafts_accepted", true), draftsOffered = n("drafts_offered", true);
-    if (draftsAccepted !== null && draftsOffered !== null && draftsAccepted > draftsOffered) throw new Error("Accepted drafts exceed offered drafts");
+    const accepted = n("drafts_accepted", true), offered = n("drafts_offered", true);
+    const draftsConsistent = accepted === null || offered === null || accepted <= offered;
+    const draftsAccepted = draftsConsistent ? accepted : null;
+    const draftsOffered = draftsConsistent ? offered : null;
     const promptMs = n("prompt_ms"), decodeMs = n("decode_ms"), engineOutput = n("engine_generated", true);
     const time = n("time");
     const date = time === null ? null : new Date(time * 1000);
@@ -109,7 +116,7 @@ export function parseStrataMetrics(value: unknown): StrataMetrics {
       ordinal: count - kept + index + 1,
       timestamp: date?.toISOString() ?? null,
       requestedInput, processedInput, cachedInput,
-      evaluatedInput: difference(processedInput, cachedInput, "request"),
+      evaluatedInput: difference(processedInput, cachedInput),
       output: n("output_tokens", true), engineOutput, promptMs, decodeMs,
       decodeRate: n("decode_tok_s") ?? (engineOutput !== null && decodeMs !== null && decodeMs > 0 ? engineOutput * 1000 / decodeMs : null),
       totalMs: promptMs !== null && decodeMs !== null ? promptMs + decodeMs : null,
@@ -127,12 +134,13 @@ export function parseStrataMetrics(value: unknown): StrataMetrics {
     if (id === null || !state || !["idle", "reading", "decoding", "generating"].includes(state)) throw new Error("Invalid live slot");
     return { slot: id, state, generated: number(slot.generated, "slot.generated", true),
       promptTokens: number(slot.prompt_tokens, "slot.prompt_tokens", true),
-      rate: number(slot.tok_s, "slot.tok_s"), elapsedSeconds: number(slot.elapsed_s, "slot.elapsed_s") };
+      rate: number(slot.tok_s, "slot.tok_s"), elapsedSeconds: number(slot.elapsed_s, "slot.elapsed_s"),
+      heldTokens: number(slot.held_tokens, "slot.held_tokens", true) };
   });
   if (new Set(slots.map((s) => s.slot)).size !== slots.length) throw new Error("Duplicate live slot");
   return {
     epoch: number(totals.since, "totals.since"), count, kept, input, cached,
-    evaluated: difference(input, cached, "totals"),
+    evaluated: difference(input, cached),
     output: number(totals.output_tokens, "totals.output_tokens", true),
     promptMs: number(totals.prompt_ms, "totals.prompt_ms"), decodeMs: number(totals.decode_ms, "totals.decode_ms"),
     draftsAccepted: number(totals.drafts_accepted, "totals.drafts_accepted", true),
@@ -146,7 +154,9 @@ export function parseStrataMetrics(value: unknown): StrataMetrics {
       promptRate: number(live.prefill_tok_s_mean, "live.prefill_tok_s_mean"),
       elapsedSeconds: number(live.elapsed_s, "live.elapsed_s"), queued: number(live.queued, "live.queued", true),
       parallel: number(live.parallel, "live.parallel", true), running: number(live.running, "live.running", true),
-      waiting: number(live.waiting, "live.waiting", true) },
+      waiting: number(live.waiting, "live.waiting", true),
+      outsideSlots: number(live.outside_slots, "live.outside_slots", true),
+      promptTokens: number(live.prompt_tokens, "live.prompt_tokens", true) },
     requests,
   };
 }

@@ -133,23 +133,41 @@ export class MetricsPanel extends Scrollable {
     const slots = [...m.live.slots].sort((a, b) => a.slot - b.slot);
     // Stock history has no completed-slot identity. Only the service block can
     // retain the latest completion; never attach it to a sampled parallel slot.
-    const activities = slots.length ? slots.map(s => ({
-      label: `Slot ${s.slot}`, state: s.state, prompt: s.promptTokens, generated: s.generated,
-      rate: s.rate, elapsed: s.elapsedSeconds, service: false,
-    })) : [{ label: "Service", state: m.live.state, prompt: m.live.promptRead, generated: m.live.generated,
-      rate: m.live.rate, elapsed: m.live.elapsedSeconds, service: true }];
+    // With batch slots, a request alone runs on the solo path (all slots idle) and a new
+    // one is read outside the slots before admission: stock reports those only as
+    // outside_slots plus the top-level live fields (the newest request in flight).
+    const busySlots = slots.filter(s => s.state !== "idle").length;
+    const outside = m.live.outsideSlots ?? (m.live.running !== null ? Math.max(0, m.live.running - busySlots) : 0);
+    const topBusy = m.live.state === "reading" || m.live.state === "generating";
+    const topLevel = {
+      state: m.live.state, prompt: m.live.promptRead, generated: m.live.generated,
+      rate: m.live.rate, elapsed: m.live.elapsedSeconds, topLevel: true, held: null as number | null,
+    };
+    const activities = slots.length ? [
+      ...(outside > 0 && topBusy ? [{ ...topLevel, label: busySlots ? "Admitting" : "Solo path", service: false,
+        extra: outside > 1 ? `  +${outside - 1} outside slots` : "" }] : []),
+      ...slots.map(s => ({
+        label: `Slot ${s.slot}`, state: s.state, prompt: s.promptTokens, generated: s.generated,
+        rate: s.rate, elapsed: s.elapsedSeconds, service: false, topLevel: false, held: s.heldTokens, extra: "",
+      })),
+    ] : [{ ...topLevel, label: "Service", service: true, extra: "" }];
     for (const activity of activities) {
       if (rows[rows.length - 1]!.length) rows.push([]);
       const prompting = activity.state === "reading";
       const generating = activity.state === "generating" || activity.state === "decoding";
       const idle = !prompting && !generating;
+      if (idle && !activity.service) {
+        rows.push([part(`${activity.label}  `), part("\u25cb idle", "textMuted"),
+          ...(activity.held ? [part("  ·  holds "), part(taskNumber(activity.held), "info"), part(" tokens for a next turn")] : [])]);
+        continue;
+      }
       const last = activity.service ? latest : undefined;
       const promptRate = activity.service ? (!idle ? m.live.promptRate :
         last && last.evaluatedInput !== null && last.promptMs !== null && last.promptMs > 0
-          ? last.evaluatedInput * 1000 / last.promptMs : null) : null;
+          ? last.evaluatedInput * 1000 / last.promptMs : null) : activity.topLevel && !idle ? m.live.promptRate : null;
       const genRate = generating ? activity.rate : idle ? last?.decodeRate ?? null : null;
       const header = [part(`${activity.label}  `), part(`${idle ? "\u25cb" : spinnerChar()} ${prompting ? "prompting" : generating ? "generating" : activity.state}`,
-        prompting ? "warning" : generating ? "success" : "textMuted")];
+        prompting ? "warning" : generating ? "success" : "textMuted"), ...(activity.extra ? [part(activity.extra)] : [])];
       if (idle && last) header.push(part("  Last task #"), part(String(last.ordinal), "text"), part(`  ${last.finish ?? "n/a"}`));
       const speeds = pair([part("  PP   "), part(taskRate(promptRate), "info")],
         [part("TG   "), part(taskRate(genRate), "success"),
@@ -159,10 +177,13 @@ export class MetricsPanel extends Scrollable {
         continue;
       }
       rows.push(header);
-      const progress = activity.service && prompting && m.live.promptTotal !== null && m.live.promptTotal > 0 && activity.prompt !== null
-        ? ` (${Math.min(100, activity.prompt * 100 / m.live.promptTotal).toFixed(0)}%)` : "";
-      rows.push([part(idle ? "  In   " : "  Prompt "), part(taskNumber(idle && last ? last.evaluatedInput : activity.prompt), "info"),
-        part(activity.service && prompting ? ` / ${taskNumber(m.live.promptTotal)}${progress} processed` : ""),
+      const total = activity.topLevel ? m.live.promptTotal ?? m.live.promptTokens : null;
+      const promptValue = activity.topLevel && prompting && activity.prompt === null ? total : activity.prompt;
+      const promptSuffix = !(activity.topLevel && prompting) ? ""
+        : activity.prompt === null ? (total !== null ? " being read" : "")
+        : ` / ${taskNumber(total)}${total ? ` (${Math.min(100, activity.prompt * 100 / total).toFixed(0)}%)` : ""} processed`;
+      rows.push([part(idle ? "  In   " : "  Prompt "), part(taskNumber(idle && last ? last.evaluatedInput : promptValue), "info"),
+        part(promptSuffix),
         part(idle ? "  ·  Out " : "  ·  Generated "), part(taskNumber(idle && last ? last.output : activity.generated), "success")]);
       rows.push(speeds);
       if (this._detailLevel === "detailed" && !idle) rows.push([part(`  Elapsed ${activity.elapsed === null ? "n/a" : `${activity.elapsed}s`}`)]);

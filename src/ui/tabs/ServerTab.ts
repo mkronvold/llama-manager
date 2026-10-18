@@ -16,6 +16,7 @@ import { inspectStrata } from "../../lib/strata";
 import {
   buildStrataProfile,
   describeStrataProfileStatus,
+  effectiveStrataSettings,
   findStrataInstallation,
   getStrataProfileStatus,
   listStrataConfigFiles,
@@ -33,7 +34,7 @@ import {
   type StrataOpAction,
   type StrataOpMarker,
 } from "../../lib/strataops";
-import { readConfigVramReserve, tuneConfiguredStrataConfigs } from "../../lib/strataconfigure";
+import { readConfigVramReserve, readStrataOverrideWarnings, tuneConfiguredStrataConfigs } from "../../lib/strataconfigure";
 import { isStrataInstallationInUse } from "../../lib/server";
 import { createSelectorModal } from "../../framework/widgets/SelectorModal";
 import { WrappedTextView, type TextLine } from "../specialized/WrappedTextView";
@@ -120,6 +121,10 @@ export class ServerControl extends Control {
     });
     this._settingsPanel.setOnEscape(() => {
       this.showProfileList();
+    });
+    this._settingsPanel.setOnChange(() => {
+      const config = this._ctx?.getConfig();
+      if (config && isStrataProfile(config.server.profiles[this.shownProfileName(config)])) this.refreshStrataDetails();
     });
 
     this._advancedCheckbox.setAction((checked: boolean) => {
@@ -494,8 +499,19 @@ export class ServerControl extends Control {
         });
         lines.push({ text: `API key: ${server.apiKey ? "profile key" : configHasKey ? "Strata config key" : "none"}` });
         lines.push({ text: "" });
-        lines.push({ text: "Requested engine settings (read-only; change them with Configure):", color: "text" });
-        for (const item of summary.settings) lines.push({ text: `  ${item.key.padEnd(22)} ${item.value}` });
+        const overrides = binding.overrides;
+        lines.push({
+          text: overrides
+            ? "Engine settings (profile overrides marked; others change with Configure):"
+            : "Requested engine settings (read-only; change them with Configure):",
+          color: "text",
+        });
+        for (const item of effectiveStrataSettings(summary.settings, overrides)) {
+          lines.push({ text: `  ${item.key.padEnd(22)} ${item.value}`, ...(item.profile ? { color: "accent" as const } : {}) });
+        }
+        for (const w of await readStrataOverrideWarnings(binding.configPath, overrides)) {
+          lines.push({ text: `Warning: ${w}`, color: "warning" });
+        }
       }
     } else {
       lines.push({ text: `Endpoint: ${server.host}:${server.port} (profile)` });

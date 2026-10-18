@@ -664,6 +664,11 @@ export function getSessionFile(): string {
   return path.join(STATE_DIR, "session.json");
 }
 
+/** Per-session Strata configs derived from a generated config plus profile engine overrides. */
+export function getStrataLaunchDir(): string {
+  return path.join(STATE_DIR, "strata-launch");
+}
+
 /** Status markers and wrapper scripts for upstream Strata Check/Configure runs. */
 export function getStrataOpsDir(): string {
   return path.join(STATE_DIR, "strata-ops");

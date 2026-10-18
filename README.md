@@ -123,9 +123,32 @@ plus that binding: Duplicate, Rename and Delete work as usual. Only the service
 **host**, **port** and **API key** are editable; host/port are copied from the
 active profile unless unset or still the llama defaults, in which case Strata's
 default `0.0.0.0:1234` is used. A non-loopback bind without any API key shows an
-exposure warning. Model, backend, context, KV, cache and speculative settings are
-shown read-only from the generated config; **Strata Config** switches between
-that installation's configs.
+exposure warning. Model, backend, cache and speculative settings are shown
+read-only from the generated config; **Strata Config** switches between that
+installation's configs.
+
+The **Strata engine (applied at Start)** group holds per-profile overrides of
+three engine settings; each defaults to `config` (use the generated value) and
+DELETE restores that:
+- **context** — `--max-context` 8K–256K (larger contexts need rope scaling, so
+  they stay with Configure);
+- **kvStreaming** — `off` keeps the whole KV cache in VRAM (no `--kv-resident`),
+  `on` streams it with **kvResidentCells** cells per layer in VRAM (config value,
+  else 32768; minimum 20480);
+- **prefill** — `auto`, `auto:16384` or `auto:32768`;
+- **parallel** — 1–8 batch slots decoding several requests together (the config's
+  `"parallel"`; 1 = one request at a time). Each slot's session takes VRAM from
+  the expert cache, about the size of its KV cache in VRAM plus ~128 MiB;
+- **batchMtp** — `--batch-mtp`: MTP drafts inside batch slots (one GPU only).
+
+The generated config is never edited for this: Start writes a copy with the
+overrides to `%LOCALAPPDATA%\llama-manager\state\strata-launch\<session>.json`
+and launches that, so Configure keeps owning the original. A non-blocking warning
+appears when the whole KV cache in VRAM may not fit (judged from the last measured
+load since boot), when streaming would keep the whole context in VRAM anyway, when
+batch slots would shrink the expert cache, or when batch MTP has no slots to use.
+While overrides are in use, Strata's own web Settings view edits the launch copy,
+not the generated config.
 
 **Check** (`setup.py --check`) and **Configure** (`setup.py --setup --no-start
 --no-browser --models-dir <manager models folder>`) open upstream tooling in a separate PowerShell window from the
@@ -144,6 +167,7 @@ setup and, after a successful run, reapplies tuning to the configs it wrote:
 RAM), and the whole KV cache in VRAM (`--kv-resident` removed) only when the
 last load since boot held every expert in VRAM with room left for the cache.
 Otherwise KV streaming is kept. The changes are listed when Configure finishes.
+Profile engine overrides (above) still win at Start.
 
 With a Strata profile active, Dashboard shows the bound installation instead of a
 version, the Models tab does not change the active model/mmproj (the Strata model
@@ -183,7 +207,10 @@ above slot-ordered activity, PP on the left and TG on the right, and completion
 timings/drafts below. Serial service activity keeps the last completed task's
 rates/tokens visible when idle, rather than replacing them with empty live data.
 Reported parallel slots use their own rates; the latest service completion is
-separate because upstream history does not identify its slot. Dashboard does
+separate because upstream history does not identify its slot. With batching on,
+a request running alone (Strata's solo path) or being read before admission is
+outside the slots, so it appears as a **Solo path**/**Admitting** row above the
+slots; idle slots show the conversation tokens they still hold. Dashboard does
 not list earlier sessions; those remain in Tasks. The summary TG is explicitly
 labelled **history**, with measured coverage, because stock aggregate totals lack
 engine-generated counts. Loaded Model distinguishes requested context/KV/spec from reported

@@ -9,7 +9,8 @@ import {
   type ServerPresets,
   type ServerProfile,
 } from "./config";
-import type { StrataInstallation, StrataProfileBinding } from "./runtime";
+import type { StrataEngineOverrides, StrataInstallation, StrataProfileBinding } from "./runtime";
+import { applyStrataOverrides } from "./strataconfigure";
 
 /** Preset fields a Strata profile exposes; every other llama preset is hidden. */
 const STRATA_PROFILE_FIELDS: Record<string, readonly string[]> = {
@@ -112,10 +113,52 @@ export async function readStrataConfigSummary(file: string): Promise<StrataConfi
     summary.settings.push({ key: arg.slice(2), value });
   }
   if (typeof obj.tokenizer === "string") summary.settings.push({ key: "tokenizer", value: path.basename(obj.tokenizer) });
+  if (typeof obj.parallel === "number") summary.settings.push({ key: "parallel", value: String(obj.parallel) });
   if (Array.isArray(obj.lib_dirs)) {
     summary.settings.push({ key: "lib_dirs", value: obj.lib_dirs.map(String).join("; ") });
   }
   return summary;
+}
+
+/**
+ * The config's requested settings with a profile's engine overrides applied for display. Overridden
+ * entries carry profile=true and note the config's own value; a setting a profile adds is appended.
+ */
+export function effectiveStrataSettings(
+  settings: ReadonlyArray<{ key: string; value: string }>,
+  overrides: StrataEngineOverrides | undefined,
+): Array<{ key: string; value: string; profile: boolean }> {
+  const out = settings.map((s) => ({ ...s, profile: false }));
+  if (!overrides) return out;
+  // Flag-only args are summarized as "on"; "parallel" is a config key, not an engine arg.
+  const configArgs = settings
+    .filter((s) => s.key !== "parallel")
+    .flatMap((s) => (s.value === "on" ? [`--${s.key}`] : [`--${s.key}`, s.value]));
+  const effective = applyStrataOverrides(configArgs, overrides);
+  const valueOf = (key: string): string | null => {
+    const i = effective.indexOf(`--${key}`);
+    if (i < 0) return null;
+    const next = effective[i + 1];
+    return next === undefined || next.startsWith("--") ? "on" : next;
+  };
+  const mark = (key: string, after: string | null, offText: string): void => {
+    const before = out.find((s) => s.key === key);
+    if ((before?.value ?? null) === after) return;
+    const note = `(profile; config ${before ? before.value : "unset"})`;
+    const value = after === null ? `${offText} ${note}` : `${after}  ${note}`;
+    if (before) Object.assign(before, { value, profile: true });
+    else out.push({ key, value, profile: true });
+  };
+  mark("max-context", valueOf("max-context"), "unset");
+  mark("kv-resident", valueOf("kv-resident"), "off: whole KV cache in VRAM");
+  mark("prefill", valueOf("prefill"), "unset");
+  if (overrides.parallel !== undefined) {
+    const before = out.find((s) => s.key === "parallel");
+    const after = String(overrides.parallel);
+    if ((before?.value ?? "1") !== after) mark("parallel", after, "1");
+  }
+  mark("batch-mtp", valueOf("batch-mtp"), "off");
+  return out;
 }
 
 export type StrataProfileStatus =

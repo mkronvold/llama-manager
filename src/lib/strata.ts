@@ -228,6 +228,7 @@ export function buildStrataLaunchSpec(
   configPath: string,
   host: string,
   port: number,
+  launchConfigPath?: string,
 ): RuntimeLaunchSpec {
   const config = inspection.configs.find((item) => item.path === path.resolve(configPath));
   if (!inspection.ready || !config || config.issues.length) {
@@ -238,7 +239,7 @@ export function buildStrataLaunchSpec(
   }
   return {
     executable: inspection.python,
-    args: ["-u", "-m", "serve.server", "--engine", "strata", "--config", config.path,
+    args: ["-u", "-m", "serve.server", "--engine", "strata", "--config", launchConfigPath ?? config.path,
       "--host", host, "--port", String(port)],
     cwd: inspection.root,
     environment: {},

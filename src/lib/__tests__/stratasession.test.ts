@@ -94,6 +94,7 @@ describe.skipIf(os.platform() !== "win32")("Strata session lifecycle", () => {
   let cfgFile: string;
   let engineLog: string;
   let extraEnv: Record<string, string>;
+  let launchedConfig: string | undefined;
   let server: typeof import("../server");
   let session: typeof import("../stratasession");
   let cfgMod: typeof import("../config");
@@ -118,6 +119,7 @@ describe.skipIf(os.platform() !== "win32")("Strata session lifecycle", () => {
     await fs.writeJson(cfgFile, { model_name: "fake-model", backend: "hip", args: ["--max-context", "8192", "--kv", "int8"] });
     await fs.writeFile(engineLog, "earlier run line\n");
     extraEnv = {};
+    launchedConfig = undefined;
 
     config = structuredClone(await cfgMod.loadConfig());
     config.strataInstallations = [{ id: "fake", root: temp, ownership: "external", registeredAt: "" }];
@@ -138,9 +140,12 @@ describe.skipIf(os.platform() !== "win32")("Strata session lifecycle", () => {
     };
     session.setStrataSessionDeps({
       inspect: async () => inspection,
-      buildLaunch: (_i, _c, host, p) => ({
-        executable: process.execPath, args: [script, "--host", host, "--port", String(p)], cwd: temp, environment: extraEnv,
-      }),
+      buildLaunch: (_i, _c, host, p, launchConfig) => {
+        launchedConfig = launchConfig;
+        return {
+          executable: process.execPath, args: [script, "--host", host, "--port", String(p)], cwd: temp, environment: extraEnv,
+        };
+      },
       engineExitTimeoutMs: 5000, verifyTimeoutMs: 10_000, unloadTimeoutMs: 5000,
     });
   });
@@ -184,6 +189,33 @@ describe.skipIf(os.platform() !== "win32")("Strata session lifecycle", () => {
     expect(server.getStatus()).toMatchObject({ running: false, runtime: null });
     const { checkPortAvailable } = await import("../strataservice");
     expect(await checkPortAvailable("127.0.0.1", port)).toBeNull();
+  }, 60_000);
+
+  it("launches a derived config with the profile's engine overrides and leaves the generated one untouched", async () => {
+    const original = await fs.readFile(cfgFile, "utf8");
+    config.server.profiles["strata-fake"]!.strata!.overrides = { maxContext: 32768, kvStreaming: "on", prefill: "auto:16384" };
+    const stale = path.join(cfgMod.getStrataLaunchDir(), "old-session.json");
+    await fs.outputJson(stale, {});
+    const pid = await server.startServer(config);
+    const marker = await readMarker();
+    expect(marker.configPath).toBe(path.resolve(cfgFile));
+    expect(marker.launchConfigPath).toBe(path.join(cfgMod.getStrataLaunchDir(), `${String(marker.sessionId)}.json`));
+    expect(launchedConfig).toBe(marker.launchConfigPath);
+    expect(await fs.pathExists(stale)).toBe(false);
+    const derived = await fs.readJson(String(marker.launchConfigPath));
+    expect(derived).toMatchObject({ model_name: "fake-model", backend: "hip" });
+    expect(derived.args).toEqual(["--max-context", "32768", "--kv", "int8", "--kv-resident", "32768", "--prefill", "auto:16384"]);
+    expect(await fs.readFile(cfgFile, "utf8")).toBe(original);
+    await until(() => server.getStatus().state === "ready");
+    expect((await server.stopServer({ mode: "graceful" })).ok).toBe(true);
+    expect(alive(pid)).toBe(false);
+  }, 60_000);
+
+  it("launches the generated config directly when the profile has no overrides", async () => {
+    await server.startServer(config);
+    expect(launchedConfig).toBeUndefined();
+    expect((await readMarker()).launchConfigPath).toBeUndefined();
+    await until(() => server.getStatus().state === "ready");
   }, 60_000);
 
   it("refuses a busy graceful stop, then force-stops on request", async () => {

@@ -59,9 +59,20 @@ describe("Strata stock metrics", () => {
     const live = parseStrataMetrics(fixture).live;
     expect(live.parallel).toBe(2);
     expect(live.slots).toEqual([
-      { slot: 0, state: "idle", generated: null, promptTokens: null, rate: null, elapsedSeconds: null },
-      { slot: 1, state: "decoding", generated: 4, promptTokens: 20, rate: 12.5, elapsedSeconds: 2 },
+      { slot: 0, state: "idle", generated: null, promptTokens: null, rate: null, elapsedSeconds: null, heldTokens: 18 },
+      { slot: 1, state: "decoding", generated: 4, promptTokens: 20, rate: 12.5, elapsedSeconds: 2, heldTokens: null },
     ]);
+    expect(live.outsideSlots).toBeNull();
+  });
+
+  it("maps requests running outside the batch slots", () => {
+    const fixture = metricsFixture();
+    Object.assign(fixture.live, { state: "reading", prompt_tokens: 26651, parallel: 4, running: 1, outside_slots: 1, waiting: 0,
+      slots: [0, 1, 2, 3].map(slot => ({ slot, state: "idle", held_tokens: 0 })) });
+    const live = parseStrataMetrics(fixture).live;
+    expect(live).toMatchObject({ outsideSlots: 1, promptTokens: 26651, running: 1 });
+    Object.assign(fixture.live, { outside_slots: -1 });
+    expect(() => parseStrataMetrics(fixture)).toThrow(/outside_slots/);
   });
 
   it("rejects malformed per-slot rates and elapsed measurements", () => {
@@ -80,10 +91,12 @@ describe("Strata stock metrics", () => {
     expect(() => parseStrataMetrics({ ...metricsFixture(), ...changes })).toThrow();
   });
 
-  it("rejects negative/nonfinite measurements and impossible cache counts", () => {
+  it("rejects negative/nonfinite measurements but tolerates one record's inconsistent counters", () => {
     const fixture = metricsFixture();
-    fixture.requests[0]!.reused = 19;
-    expect(() => parseStrataMetrics(fixture)).toThrow(/cached exceeds/);
+    // Observed live: a finish=error record reported more reused than processed tokens.
+    Object.assign(fixture.requests[0]!, { reused: 19, drafts_accepted: 5, drafts_offered: 2 });
+    const request = parseStrataMetrics(fixture).requests[0]!;
+    expect(request).toMatchObject({ cachedInput: 19, evaluatedInput: null, draftsAccepted: null, draftsOffered: null });
     fixture.requests[0]!.reused = 0;
     fixture.requests[0]!.decode_ms = NaN;
     expect(() => parseStrataMetrics(fixture)).toThrow(/decode_ms/);

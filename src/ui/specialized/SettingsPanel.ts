@@ -8,8 +8,13 @@ import {
   saveConfig,
 } from "../../lib/config";
 import { isPresetFieldVisibleForStrata, strataFieldDefault } from "../../lib/strataprofile";
+import {
+  STRATA_CONTEXT_CHOICES, STRATA_KV_RESIDENT_DEFAULT, STRATA_KV_RESIDENT_MIN, STRATA_PARALLEL_MAX, STRATA_PREFILL_CHOICES,
+  type StrataEngineOverrides, type StrataProfileBinding,
+} from "../../lib/runtime";
+import { readStrataOverrideWarnings } from "../../lib/strataconfigure";
 import type { RenderContext } from "../../framework/types";
-import { EditableList, EditableRowInfo, formatFieldValue } from "./EditableList";
+import { EditableList, EditableFieldDef, EditableRowInfo, formatFieldValue } from "./EditableList";
 import { createDeviceSelectorModal } from "./DeviceSelectorModal";
 import { createMmprojSelectorModal } from "./MmprojSelectorModal";
 import { createModelSelectorModal } from "./ModelSelectorModal";
@@ -20,6 +25,21 @@ import { fireAsync } from "../../lib/utils";
 import { detectForkFromFolder, isForkCompatibleWithPreset, isFieldCompatibleWithFork } from "../../lib/forks";
 
 const KEY_COL_WIDTH = 18;
+
+/** Sentinel category index for the profile-owned Strata engine settings (not a PRESET_CATEGORIES entry). */
+const STRATA_ENGINE_CAT = -1;
+const FROM_CONFIG = "config";
+const STRATA_ENGINE_FIELDS: EditableFieldDef[] = [
+  { key: "context", type: "enum", options: [FROM_CONFIG, ...STRATA_CONTEXT_CHOICES.map(String)] },
+  { key: "kvStreaming", type: "enum", options: [FROM_CONFIG, "off", "on"] },
+  { key: "kvResidentCells", type: "number" },
+  { key: "prefill", type: "enum", options: [FROM_CONFIG, ...STRATA_PREFILL_CHOICES] },
+  {
+    key: "parallel", type: "enum",
+    options: [FROM_CONFIG, ...Array.from({ length: STRATA_PARALLEL_MAX }, (_, i) => String(i + 1))],
+  },
+  { key: "batchMtp", type: "enum", options: [FROM_CONFIG, "off", "on"] },
+];
 
 interface ModalFieldDef extends PresetFieldDef {
   modal?: boolean;
@@ -32,6 +52,7 @@ export class SettingsPanel extends EditableList {
   protected _onMessage: ((msg: string) => void) | null = null;
   protected _onEscape: (() => void) | null = null;
   protected _editingProfile: string | null = null;
+  protected _onChange: (() => void) | null = null;
 
   setTabContext(ctx: TabContext | null): void {
     this._ctx = ctx;
@@ -88,6 +109,13 @@ export class SettingsPanel extends EditableList {
           for (const { field, fieldIdx } of fields) this._rows.push({ type: "field", catIdx, fieldIdx, field });
         }
       }
+      this._rows.push({ type: "header", catIdx: STRATA_ENGINE_CAT });
+      if (!this._collapsed.has(STRATA_ENGINE_CAT)) {
+        STRATA_ENGINE_FIELDS.forEach((field, fieldIdx) => {
+          if (field.key === "kvResidentCells" && profile.strata.overrides?.kvStreaming !== "on") return;
+          this._rows.push({ type: "field", catIdx: STRATA_ENGINE_CAT, fieldIdx, field });
+        });
+      }
       return;
     }
 
@@ -119,6 +147,7 @@ export class SettingsPanel extends EditableList {
 
   protected getRowValue(row: EditableRowInfo): unknown {
     if (row.type !== "field" || !row.field || !this._config) return undefined;
+    if (row.catIdx === STRATA_ENGINE_CAT) return this.getStrataEngineValue(row.field.key);
     const profileName = this._editingProfile || this._config.server.activeProfile;
     const presets = this._config.server.profiles[profileName]?.presets;
     const presetData = presets?.[PRESET_CATEGORIES[row.catIdx]!.presetKey];
@@ -137,6 +166,10 @@ export class SettingsPanel extends EditableList {
 
   protected setRowValue(row: EditableRowInfo, value: unknown): void {
     if (row.type !== "field" || !row.field || !this._config) return;
+    if (row.catIdx === STRATA_ENGINE_CAT) {
+      this.setStrataEngineValue(row.field.key, value);
+      return;
+    }
     const profileName = this._editingProfile || this._config.server.activeProfile;
     const presets = this._config.server.profiles[profileName]?.presets;
     const presetData = presets?.[PRESET_CATEGORIES[row.catIdx]!.presetKey];
@@ -150,12 +183,27 @@ export class SettingsPanel extends EditableList {
   }
 
   protected drawHeader(canvas: NonNullable<RenderContext["canvas"]>, row: EditableRowInfo, isHighlighted: boolean, width: number): void {
-    const cat = PRESET_CATEGORIES[row.catIdx]!;
-    drawEditableHeader(canvas, cat.name, this._collapsed.has(row.catIdx), isHighlighted, this.focused, width);
+    const name = row.catIdx === STRATA_ENGINE_CAT ? "Strata engine (applied at Start)" : PRESET_CATEGORIES[row.catIdx]!.name;
+    drawEditableHeader(canvas, name, this._collapsed.has(row.catIdx), isHighlighted, this.focused, width);
   }
 
   protected drawField(canvas: NonNullable<RenderContext["canvas"]>, row: EditableRowInfo, isHighlighted: boolean, isEditing: boolean, width: number): void {
     const field = row.field!;
+    if (row.catIdx === STRATA_ENGINE_CAT) {
+      const keyStr = ` ${field.key}`.padEnd(KEY_COL_WIDTH);
+      if (isEditing && this._edit) {
+        drawEditableField(canvas, keyStr, this._edit.text, "", true, isHighlighted, this.focused, width);
+        return;
+      }
+      const value = this.getStrataEngineValue(field.key);
+      const shown = field.key === "kvResidentCells" && value === undefined
+        ? `config, else ${STRATA_KV_RESIDENT_DEFAULT}` : String(value);
+      const extra = isHighlighted
+        ? field.type === "enum" && field.options ? ` [${field.options.join(" | ")}]` : ` (min ${STRATA_KV_RESIDENT_MIN})`
+        : "";
+      drawEditableField(canvas, keyStr, shown, extra, false, isHighlighted, this.focused, width);
+      return;
+    }
     const cat = PRESET_CATEGORIES[row.catIdx]!;
     const profileName = this._editingProfile || this._config?.server.activeProfile || "";
     const presets = this._config?.server.profiles[profileName]?.presets;
@@ -187,6 +235,80 @@ export class SettingsPanel extends EditableList {
     saveConfig(this._config).catch((e) => {
       this._onMessage?.(`Error saving: ${e}`);
     });
+    this._onChange?.();
+  }
+
+  setOnChange(cb: () => void): void {
+    this._onChange = cb;
+  }
+
+  protected strataBinding(): StrataProfileBinding | null {
+    if (!this._config) return null;
+    const profile = this._config.server.profiles[this._editingProfile || this._config.server.activeProfile];
+    return isStrataProfile(profile) ? profile.strata : null;
+  }
+
+  protected getStrataEngineValue(key: string): unknown {
+    const o = this.strataBinding()?.overrides;
+    switch (key) {
+      case "context": return o?.maxContext !== undefined ? String(o.maxContext) : FROM_CONFIG;
+      case "kvStreaming": return o?.kvStreaming ?? FROM_CONFIG;
+      case "kvResidentCells": return o?.kvResidentCells;
+      case "prefill": return o?.prefill ?? FROM_CONFIG;
+      case "parallel": return o?.parallel !== undefined ? String(o.parallel) : FROM_CONFIG;
+      case "batchMtp": return o?.batchMtp ?? FROM_CONFIG;
+      default: return undefined;
+    }
+  }
+
+  protected setStrataEngineValue(key: string, value: unknown): void {
+    const binding = this.strataBinding();
+    if (!binding) return;
+    const o: StrataEngineOverrides = { ...binding.overrides };
+    const fromConfig = value === null || value === undefined || value === FROM_CONFIG;
+    switch (key) {
+      case "context":
+        if (fromConfig) delete o.maxContext; else o.maxContext = Number(value);
+        break;
+      case "kvStreaming":
+        if (fromConfig) delete o.kvStreaming; else o.kvStreaming = value as "on" | "off";
+        break;
+      case "kvResidentCells": {
+        const n = Number(value);
+        if (fromConfig) {
+          delete o.kvResidentCells;
+        } else if (!Number.isInteger(n) || n < STRATA_KV_RESIDENT_MIN) {
+          this._onMessage?.(`KV cells in VRAM must be a whole number of at least ${STRATA_KV_RESIDENT_MIN}`);
+          return;
+        } else {
+          o.kvResidentCells = n;
+        }
+        break;
+      }
+      case "prefill":
+        if (fromConfig) delete o.prefill; else o.prefill = value as StrataEngineOverrides["prefill"];
+        break;
+      case "parallel":
+        if (fromConfig) delete o.parallel; else o.parallel = Number(value);
+        break;
+      case "batchMtp":
+        if (fromConfig) delete o.batchMtp; else o.batchMtp = value as "on" | "off";
+        break;
+    }
+    if (Object.keys(o).length) binding.overrides = o; else delete binding.overrides;
+    this.buildRows();
+    this.clampSelection();
+    this.reportStrataWarnings(binding);
+  }
+
+  protected reportStrataWarnings(binding: StrataProfileBinding): void {
+    if (!binding.configPath) return;
+    const overrides = binding.overrides;
+    void readStrataOverrideWarnings(binding.configPath, overrides).then((warnings) => {
+      if (warnings.length && this.strataBinding()?.overrides === overrides) {
+        this._onMessage?.(`Warning: ${warnings.join("; ")}`);
+      }
+    }, () => undefined);
   }
 
   // --- Override for escape callback and modal fields ---
@@ -229,6 +351,14 @@ export class SettingsPanel extends EditableList {
   protected restoreDefault(): void {
     const row = this._rows[this._selectedIndex];
     if (!row || row.type !== "field" || !row.field) return;
+
+    if (row.catIdx === STRATA_ENGINE_CAT) {
+      this.setRowValue(row, null);
+      this.saveAndMessage();
+      this._onMessage?.(`Restored ${row.field.key} to the generated config's value`);
+      this.markDirty();
+      return;
+    }
 
     const cat = PRESET_CATEGORIES[row.catIdx]!;
     const fieldDef = cat.fields.find(f => f.key === row.field!.key);

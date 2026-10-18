@@ -582,9 +582,13 @@ runtime boundary identifies upstream-owned settings and JSON telemetry and enabl
 the Strata lifecycle (below). Metrics/tasks and managed setup/update are later
 phases.
 
-Profiles: `ServerProfile.strata?: { installationId: string; configPath: string | null }`.
+Profiles: `ServerProfile.strata?: { installationId: string; configPath: string | null;
+overrides?: { maxContext?; kvStreaming?: "on" | "off"; kvResidentCells?; prefill?; parallel?; batchMtp?: "on" | "off" } }`.
 Absent means a llama-compatible profile (unchanged behavior). `loadConfig`
-preserves and validates the binding (non-empty ID, null or absolute config path);
+preserves and validates the binding (non-empty ID, null or absolute config path;
+overrides: maxContext ∈ {8192, 32768, 65536, 131072, 204800, 262144}, integer
+kvResidentCells ≥ 20480, prefill ∈ {auto, auto:16384, auto:32768}, integer
+parallel 1–8, batchMtp on/off);
 invalid bindings are errors, not silent resets, and `saveConfig` validates too.
 The global `activeVersion` is never changed by Strata profiles. Profiles tab
 Create asks for the runtime; a Strata profile starts from default presets with
@@ -592,9 +596,26 @@ empty free-form args and only `server.host`/`port`/`apiKey` visible. Endpoint
 seeding copies the active profile's values unless missing or still the llama
 defaults (127.0.0.1 / 8080), which become 0.0.0.0 / 1234; restore-default uses
 the same. A non-loopback host with no profile or config API key produces a
-non-blocking exposure warning. Generated config settings are displayed read-only
-(path flags as basenames); the profile view and Start never rewrite the config
-(only the post-Configure tuning below does).
+non-blocking exposure warning. Generated config settings are displayed
+(path flags as basenames) with profile overrides marked against the config's
+value; the profile view and Start never rewrite the config (only the
+post-Configure tuning below does).
+
+Overrides (`applyStrataOverrides`): maxContext sets `--max-context`; kvStreaming
+"off" removes `--kv-resident`, "on" sets it to kvResidentCells, else the
+config's value, else 32768 (kvResidentCells alone only replaces an existing
+value); prefill sets `--prefill`; parallel sets the top-level `"parallel"`
+(removed for 1) and drops `--batch`/`--slots` from args (the server ignores
+`"parallel"` when they are present); batchMtp adds/removes `--batch-mtp`. When
+they change the config, Start writes it with only `args`/`parallel` replaced to `STATE_DIR\strata-launch\<sessionId>.json`
+(earlier copies are pruned; only one session runs), launches it via
+`--config`, and records it as the marker's `launchConfigPath`; `configPath`
+remains the generated config (validation, engine log). Config view and API-key
+reads prefer the launch copy. Warnings (non-blocking): no `--kv-resident` with a
+context/KV override that `decideKvInVram` rejects for the last load, resident
+cells ≥ context, batch slots (N × (KV cells in VRAM + 128 MiB)) exceeding the
+last load's free VRAM minus 2048 MiB or with no load measured since boot, and
+batchMtp on with fewer than 2 slots.
 
 Check/Configure run `setup.py --check` or `setup.py --setup --no-start
 --no-browser --models-dir <getModelsDir(config)>` (upstream does not persist
@@ -652,7 +673,7 @@ immediately; failure to read them or to write the marker force-stops the new tre
 
 Session marker v2 (`STATE_DIR\session.json`): `{version: 2, runtime: "strata",
 sessionId, pid, pidCreatedAt, executable, engineExecutable, startedAt,
-installationId, installationRoot, profileName, configPath, host, port, pollHost,
+installationId, installationRoot, profileName, configPath, launchConfigPath?, host, port, pollHost,
 logFiles: {out, err, engine, engineStart}, keySource, runtimeVersion?}`; no secrets. Unversioned
 markers are legacy llama markers with unchanged behavior; a versioned marker that
 does not validate is ignored (never treated as llama).
@@ -710,7 +731,10 @@ completion's PP/TG and In/Out; active-request rates never fall back to a previou
 completion. Time/drafts describe the explicitly labelled last task. Real slots
 use stock `tok_s` and `elapsed_s`; their unknown measurements remain unavailable.
 Completed history lacks slot association, so a last service completion is
-shown separately rather than assigned to an idle parallel slot. No historical
+shown separately rather than assigned to an idle parallel slot. Requests outside
+the slots (stock `live.outside_slots`: the solo path or an admission read) render
+from the top-level live fields as a Solo path/Admitting row before the slots;
+idle slots show `held_tokens`. No historical
 session list is added to Dashboard. The summary TG position is labelled history
 and discloses paired measurement coverage; it is not an upstream session TG.
 
