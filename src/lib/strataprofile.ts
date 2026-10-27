@@ -76,7 +76,7 @@ export interface StrataConfigSummary {
   error: string | null;
 }
 
-const PATH_FLAGS = new Set(["--pack", "--native", "--expert-profile", "--mtp"]);
+const PATH_FLAGS = new Set(["--pack", "--native", "--ple-gguf", "--expert-profile", "--mtp"]);
 
 /** Reads a generated strata-*.json for read-only display. Never throws. */
 export async function readStrataConfigSummary(file: string): Promise<StrataConfigSummary> {
