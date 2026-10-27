@@ -143,6 +143,7 @@ export class VersionsControl extends Control {
       {
         label: "Tag/Source",
         width: 14,
+        flex: 1,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
@@ -163,7 +164,7 @@ export class VersionsControl extends Control {
       },
       {
         label: "Backend",
-        width: 14,
+        width: 16,
         flex: 1,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
@@ -180,6 +181,7 @@ export class VersionsControl extends Control {
       {
         label: "Fork",
         width: 14,
+        flex: 1,
         align: "left",
         format: (_v, row: VersionInfo | RemoteVersion | AvailableBackend) => {
           if ("active" in row) {
@@ -456,8 +458,19 @@ export class VersionsControl extends Control {
     await this.showReleases();
   }
 
+  /** Share spare width evenly, except asset filenames in the backend picker need most of it. */
+  protected applyColumnFlex(): void {
+    const assets = this._mode === "backends";
+    const flex: Record<string, number> = { "Tag/Source": 1, Backend: assets ? 4 : 1, Fork: assets ? 0 : 1 };
+    for (const col of this._table.columns) {
+      if (col.label in flex) col.flex = flex[col.label];
+    }
+    this._table.markDirty();
+  }
+
   async showLocal(): Promise<void> {
     this._mode = "local";
+    this.applyColumnFlex();
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Installed Versions";
@@ -479,6 +492,7 @@ export class VersionsControl extends Control {
     if (!ctx) return;
 
     this._mode = "releases";
+    this.applyColumnFlex();
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Select version";
@@ -530,6 +544,7 @@ export class VersionsControl extends Control {
     if (!ctx) return;
 
     this._mode = "backends";
+    this.applyColumnFlex();
     this._dividerButtons.visible = true;
     this._buttonRow.visible = true;
     this._versionsSection.title = "Select backend";
