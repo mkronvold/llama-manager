@@ -63,6 +63,10 @@ export class TaskChartsSection extends Section {
     this._outputTokenChart.renderMode = "braille";
     this._outputTokenChart.flex = 1;
 
+    for (const chart of [this._inputSpeedChart, this._outputSpeedChart, this._inputTokenChart, this._outputTokenChart]) {
+      chart.showHoverLabel = false;
+    }
+
     this._row = new Row();
     this._row.add(this._inputSpeedChart);
     this._row.add(this._outputSpeedChart);

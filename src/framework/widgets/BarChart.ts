@@ -69,6 +69,7 @@ export class BarChart extends Control {
 
   // ── Hover ──
   protected _hoverSubtitle = "";
+  public showHoverLabel = true;
   protected _titleRows = 0;
   protected _chartRows = 0;
   protected _chartWidth = 0;
@@ -251,8 +252,11 @@ export class BarChart extends Control {
   }
 
   protected buildHoverSubtitle(label: string, values: (number | null)[]): string {
-    const vals = values.map(v => v === null ? "n/a" : this.formatTick(v)).join(", ");
-    return label ? `${label}: ${vals}` : vals;
+    const vals = values.map(v => {
+      const text = v === null ? "n/a" : this.formatTick(v);
+      return this.showHoverLabel ? text : text.trim();
+    }).join(", ");
+    return this.showHoverLabel && label ? `${label}: ${vals}` : vals;
   }
 
   // ── Rendering ──

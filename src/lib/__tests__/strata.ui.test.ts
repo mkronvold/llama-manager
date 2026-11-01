@@ -31,6 +31,15 @@ describe("runtime-aware measurement presentation", () => {
     chart.destroy();
   });
 
+  it("can show only hovered values without task labels, including unknowns and paired bars", () => {
+    const chart = new TestChart();
+    try {
+      chart.showHoverLabel = false;
+      expect(chart.hover([42])).toBe("42");
+      expect(chart.hover([null, 0])).toBe("n/a, 0");
+    } finally { chart.destroy(); }
+  });
+
   it("labels service activity and session/history distinctions without a synthetic slot", () => {
     setStrataMetrics({ snapshot: parseStrataMetrics(metricsFixture()), receivedAt: Date.now(),
       error: null, historyError: null, missingRequests: 5 });
