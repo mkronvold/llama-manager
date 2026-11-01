@@ -50,6 +50,87 @@ rationale. Prerequisites and recommendations:
   `%LOCALAPPDATA%\llama-manager` on Windows (see Storage below); existing data from a previous
   XDG-style install is migrated automatically on first run.
 
+#### Windows setup from a clone
+
+Run the following from this fork's clone in PowerShell (5.1 or 7). Close
+llama-manager first. Setup prompts by default, including confirmation before
+installing prerequisites and before the optional Strata download:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
+```
+
+It uses **winget** (Microsoft App Installer) to install missing Git,
+nvm-windows and Windows Terminal; activates Node **22.23.2** with its bundled
+npm; runs `npm ci` (including the build) and `npm link`. Installers or `nvm use`
+may require elevation under the same Windows account. It does not install GPU
+drivers or automatically uninstall a conflicting standalone Node installation.
+If SQLite compilation fails, install Python and Visual Studio Build Tools with
+the **Desktop development with C++** workload, then rerun.
+
+Optional Strata defaults to a sibling `Strata` directory. Its upstream
+`START-HERE.bat --check` checks hardware, then setup chooses the Qwen model size
+automatically for the machine. Allow a large download (roughly 70-120 GB) and
+follow the hardware check's disk/RAM requirements. Setup passes localhost:1234,
+32K context and `--no-start`. No model or inference is started. Registration
+creates a profile named **strata** inheriting upstream's automatic KV streaming choice, parallel 1 and batch
+MTP off; it leaves the active profile and any existing `strata` profile alone.
+An existing manager config is backed up before saving. An existing Strata
+installation is not fetched/updated automatically; rerunning its setup may
+retune generated configs and asks for confirmation in interactive mode.
+
+For unattended installation, `-Yes` accepts prerequisite installation but
+**skips optional components unless explicitly requested**:
+
+```powershell
+.\scripts\setup-windows.ps1 -Yes -Strata Install -StrataBackend cuda -Shortcut Install
+.\scripts\setup-windows.ps1 -Yes -Strata Skip -Shortcut Skip
+```
+
+Options: `-Strata` and `-Shortcut` accept `Ask` (default), `Install`, or `Skip`;
+`-NodeVersion` accepts Node 22.12+ in the 22.x series; `-StrataDirectory` chooses
+the installation folder; `-StrataBackend` accepts `auto` (default), `cuda`, or
+`hip`; `-StrataContext` accepts 1024-32768 tokens (default 32768). If multiple
+valid generated Strata configs exist, setup stops rather than guessing: rerun
+with `-StrataConfig 'C:\src\Strata\strata-iq2_xs.json'`.
+
+`-Winget Ask|Install|Skip` controls the offer to bootstrap missing winget using
+Microsoft's documented `Microsoft.WinGet.Client` module and
+`Repair-WinGetPackageManager`. If repair requires elevation or App Installer
+registration/a new terminal, setup stops with instructions. `-Yes` alone does
+not approve this optional bootstrap.
+
+`-UpdateClone Ask|Install|Skip` controls clone updates. Setup fetches the
+tracking branch and offers incoming updates interactively. Unattended updates
+require `-UpdateClone Install`; only clean, fast-forward updates are allowed.
+After applying an update, rerun setup so the updated script is used. ZIP
+installs and clones without tracking branches get manual update guidance.
+No files are stashed/reset and no branch is guessed.
+
+Setup validates activated tools, native SQLite, type checking and the final
+build. Optional Strata gets NVIDIA diagnostics where relevant and another
+`START-HERE --check` after installation, followed by config inspection.
+Missing/broken `nvidia-smi` produces official NVIDIA driver instructions;
+AMD-only systems are not required to have it. Drivers are never installed
+automatically. Failed checks stop dependent steps rather than claiming readiness.
+
+KV streaming is not exclusive to Strix Halo: upstream auto uses context and
+available RAM. At the initial 32K context it is off; from 64K it can put KV in
+system RAM to save VRAM if the RAM budget permits (WSL disables it).
+Setup does not duplicate that heuristic or force an override on the profile.
+Existing profiles keep their settings.
+
+After optional Strata setup finishes, the script explicitly rebuilds
+llama-manager before the shortcut step. A failed build stops setup without
+creating a shortcut. Strata's own setup prepares its engine and model.
+The optional shortcut step opens Explorer for **manual** taskbar pinning.
+For network access later, set an API key before changing the profile's host
+from `127.0.0.1` to `0.0.0.0`. Do not copy another machine's config or API keys.
+Successful setup ends with short launch instructions: select **strata** in
+Profiles and **Start** on Dashboard, or install a runtime through Versions
+and a fitting GGUF through Models if Strata was skipped. Actual loading and
+one live prompt remain your final acceptance check.
+
 #### Local Windows shortcut
 
 From a local clone, after `npm install` and `npm run build`, run this in a
