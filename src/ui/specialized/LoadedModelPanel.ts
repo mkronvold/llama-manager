@@ -438,8 +438,8 @@ export class LoadedModelPanel extends Control {
   protected strataRows(): number {
     if (!strataView) return 0;
     if (this._detailLevel === "basic") return 1;
-    if (this._detailLevel === "middle") return 2;
-    return 2 + (strataView.reported ? 1 : 0) + (strataView.detail ? 1 : 0);
+    if (this._detailLevel === "middle") return 3;
+    return 3 + (strataView.reported ? 1 : 0) + (strataView.detail ? 1 : 0);
   }
 
   protected drawStrata(ctx: RenderContext, view: StrataModelView): void {
@@ -467,7 +467,11 @@ export class LoadedModelPanel extends Control {
       fg(canvas, "text", view.kv);
     }
     fg(canvas, "textMuted", `  ·  key: ${view.keySource}`);
-    let row = 2;
+    if (rows < 3) return;
+    canvas.moveTo(x, y + 2);
+    fg(canvas, "textMuted", "  Monitor ");
+    fg(canvas, "info", `${view.endpoint.replace(/\/+$/, "")}/#monitor`);
+    let row = 3;
     if (view.reported && rows > row) {
       canvas.moveTo(x, y + row++);
       fg(canvas, "textMuted", `  ${view.reportedStale ? "Last reported (stale)" : "Reported"} Ctx ${view.reported.context === null ? "n/a" : fmtCtx(view.reported.context)} (requested ${view.context ?? "n/a"})`);
