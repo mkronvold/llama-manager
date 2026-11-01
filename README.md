@@ -50,6 +50,27 @@ rationale. Prerequisites and recommendations:
   `%LOCALAPPDATA%\llama-manager` on Windows (see Storage below); existing data from a previous
   XDG-style install is migrated automatically on first run.
 
+#### Local Windows shortcut
+
+From a local clone, after `npm install` and `npm run build`, run this in a
+PowerShell session where `node --version` works:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-shortcut.ps1
+```
+
+The script creates `Llama Manager.lnk` in the repository using the detected absolute
+Node.js and Windows Terminal paths, so launching it from Explorer does not depend
+on Explorer's Node `PATH`. The generated shortcut is machine-local and gitignored.
+Rerun setup if you move the clone or change your Node installation path; rebuild
+with `npm run build` after source updates.
+
+Explorer opens with the shortcut selected. Right-click it, choose **Show more
+options** if needed, then **Pin to taskbar**. Unpin any older shortcut first.
+Modern Windows does not support reliable automatic pinning from an ordinary
+PowerShell setup script. Pass `-NoExplorer` to generate the shortcut without opening
+Explorer.
+
 #### Troubleshooting: a version install hangs forever at "Extracting..."
 
 If the Versions tab gets stuck at `Extracting...` and never finishes (even after several
