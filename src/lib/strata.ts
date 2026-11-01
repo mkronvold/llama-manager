@@ -77,7 +77,9 @@ async function inspectConfig(file: string, root: string, backend: string | null)
   if (raw.cwd !== undefined && (typeof raw.cwd !== "string" || !raw.cwd.trim())) {
     issues.push("cwd must be a non-empty path");
   }
-  if (raw.backend !== backend) issues.push("Config backend does not match the installed engine manifest");
+  if (raw.backend !== undefined && raw.backend !== backend) {
+    issues.push("Config backend does not match the installed engine manifest");
+  }
   const cwd = typeof raw.cwd === "string" ? resolvePath(root, raw.cwd) : root;
   const args = Array.isArray(raw.args) && raw.args.every((arg): arg is string => typeof arg === "string")
     ? raw.args : [];
@@ -166,14 +168,26 @@ export async function inspectStrata(
   await requirePath(python, false, issues);
   try {
     const manifest = await readObject(path.join(root, "engine", "BUILD.json"));
-    if (manifest.platform !== "windows-x64") issues.push("Engine manifest must specify windows-x64");
-    if (manifest.backend !== "hip" && manifest.backend !== "cuda") issues.push("Unsupported Windows engine backend");
-    else inspection.backend = manifest.backend;
+    if (manifest.platform !== undefined && manifest.platform !== "windows-x64") {
+      issues.push("Engine manifest must specify windows-x64");
+    }
+    if (manifest.backend === "hip" || manifest.backend === "cuda") {
+      inspection.backend = manifest.backend;
+    } else if (typeof manifest.cuda === "string" && manifest.cuda.trim()) {
+      // Strata 0.2.9 prebuilt CUDA manifests omit the legacy platform/backend fields.
+      inspection.backend = "cuda";
+    } else {
+      issues.push("Unsupported Windows engine backend");
+    }
     if (typeof manifest.version !== "string" || !manifest.version) issues.push("Missing engine version");
     else inspection.engineVersion = manifest.version;
-    if (!Array.isArray(manifest.archs) || !manifest.archs.every((item) => typeof item === "string")) {
-      issues.push("Engine manifest archs must be an array of strings");
-    } else inspection.architectures = manifest.archs;
+    if (!Array.isArray(manifest.archs) || !manifest.archs.every(
+      (item) => (typeof item === "string" && item.trim()) || (typeof item === "number" && Number.isFinite(item)),
+    )) {
+      issues.push("Engine manifest archs must be an array of architecture strings or numbers");
+    } else {
+      inspection.architectures = manifest.archs.map(String);
+    }
     if (manifest.lib_dirs !== undefined) {
       if (!Array.isArray(manifest.lib_dirs) || !manifest.lib_dirs.every((dir) => typeof dir === "string")) {
         issues.push("Engine manifest lib_dirs must be an array of paths");

@@ -87,6 +87,25 @@ describe("Strata registration and inspection", () => {
     expect(runner.mock.calls.every((call) => call[1][0] !== "-m")).toBe(true);
   });
 
+  it("accepts current prebuilt CUDA manifests and configs without a backend field", async () => {
+    await fs.outputJson(path.join(root, "engine", "BUILD.json"), {
+      version: "0.1.55", source: "prebuilt", commit: "99866a47a2b8",
+      archs: [75, 86, 89, 120], cuda: "13.0", ptx: true,
+    });
+    const configPath = path.join(root, "strata-model.json");
+    const generated = await fs.readJson(configPath) as Record<string, unknown>;
+    delete generated.backend;
+    await fs.outputJson(configPath, generated);
+
+    const result = await inspectStrata(root, runner);
+
+    expect(result).toMatchObject({
+      ready: true, engineVersion: "0.1.55", backend: "cuda",
+      architectures: ["75", "86", "89", "120"],
+    });
+    expect(result.configs[0]?.issues).toEqual([]);
+  });
+
   it("builds direct Python argv with space-containing paths and no llama flags", async () => {
     const inspection = await inspectStrata(root, runner);
     const spec = buildStrataLaunchSpec(inspection, path.join(root, "strata-model.json"), "127.0.0.1", 8096);
